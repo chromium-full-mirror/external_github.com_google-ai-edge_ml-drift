@@ -29,6 +29,7 @@
 #include "ml_drift/common/task/buffer_desc.h"
 #include "ml_drift/common/task/compiler_options.h"
 #include "ml_drift/common/task/gpu_object_desc.h"
+#include "ml_drift/common/task/gpu_operation.h"
 #include "ml_drift/common/task/tensor_desc.h"
 #include "ml_drift/common/task/tuning_type.h"
 #include "ml_drift/common/task/work_group_picking.h"
@@ -38,7 +39,8 @@
 
 namespace ml_drift {
 namespace {
-std::string GetCode(const ConvWaveMatrixMaliF16::KernelParams& kernel_params) {
+std::string GetCode(const ConvWaveMatrixMaliF16::ConvParams& conv_params,
+                    const ConvWaveMatrixMaliF16::KernelParams& kernel_params) {
   auto GetGlobalID = [&](int id) {
     int3 wg_order = kernel_params.slices_first ? int3(1, 0, 2) : int3(0, 1, 2);
     int3 launch_remap;
@@ -73,17 +75,21 @@ MAIN_FUNCTION($0) {
        std::to_string(kernel_params.x_block_size * 8) + ";\n";
   c += "  int subgroup_dst_s_base = " + GetGlobalID(1) + " * " +
        std::to_string(kernel_params.s_block_size * 4) + ";\n";
-  c += "  int y = " + GetGlobalID(2) + ";\n";
+  c += "  int dst_y = " + GetGlobalID(2) + ";\n";
   c += R"(
-
-  if (subgroup_base_x >= args.dst.Width() || y >= args.dst.Height() || subgroup_dst_s_base >= args.dst.Slices()) {
+  if (subgroup_base_x >= args.dst.Width() || dst_y >= args.dst.Height() || subgroup_dst_s_base >= args.dst.Slices()) {
     return;
   }
-  int SRC_X = subgroup_base_x + x_sub_id;
-
-  __global half8* w_base = (__global half8*)(args.weights.GetPtr() + subgroup_dst_s_base * 4 * args.src.Slices());
-
-  )";
+)";
+  std::string weights_offset = "subgroup_dst_s_base * 4 * args.src.Slices()";
+  if (!conv_params.x_kernel_is_1) {
+    weights_offset += " * args.kernel_size_x";
+  }
+  if (!conv_params.y_kernel_is_1) {
+    weights_offset += " * args.kernel_size_y";
+  }
+  c += "  __global half8* w_base = (__global half8*)(args.weights.GetPtr() + " +
+       weights_offset + ");\n";
   for (int s = 0; s < kernel_params.s_block_size; s++) {
     for (int x = 0; x < kernel_params.x_block_size; x++) {
       std::string patch = R"(
@@ -93,15 +99,57 @@ MAIN_FUNCTION($0) {
       c += absl::Substitute(patch, x, s * 2 + 0, s * 2 + 1);
     }
   }
-  c += R"(
-
-  for (int src_slice = 0; src_slice < args.src.Slices(); src_slice += 2) {
-)";
+  if (!conv_params.y_kernel_is_1) {
+    c += "  for (int ky = 0; ky < args.kernel_size_y; ++ky) {\n";
+    c += "  int src_y = ky * args.dilation_y + dst_y * args.stride_y + "
+         "args.padding_y;\n";
+    c += "  bool in_y = src_y >= 0 && src_y < args.src.Height();\n";
+    c += "  src_y = clamp(src_y, 0, args.src.Height() - 1);\n";
+  } else {
+    c += "  int src_y = min(dst_y, args.src.Height() - 1);\n";
+  }
+  if (!conv_params.x_kernel_is_1) {
+    c += "  for (int kx = 0; kx < args.kernel_size_x; ++kx) {\n";
+    for (int x = 0; x < kernel_params.x_block_size; x++) {
+      const std::string src_x = "src_x" + std::to_string(x);
+      c += "  int " + src_x +
+           " = kx * args.dilation_x + (subgroup_base_x + x_sub_id + " +
+           std::to_string(x * 8) + ") * args.stride_x + args.padding_x;\n";
+      c += "  bool in_x" + std::to_string(x) + " = " + src_x + " >= 0 && " +
+           src_x + " < args.src.Width();\n";
+      c += "  " + src_x + " = clamp(" + src_x + ", 0, args.src.Width() - 1);\n";
+    }
+  } else {
+    for (int x = 0; x < kernel_params.x_block_size; x++) {
+      std::string patch =
+          "  int src_x$0 = min(subgroup_base_x + x_sub_id + $1, "
+          "args.src.Width() - 1);\n";
+      c += absl::Substitute(patch, x, x * 8);
+    }
+  }
+  c += "  for (int src_s = 0; src_s < args.src.Slices(); src_s += 2) {\n";
+  const int src_slices = DivideRoundUp(conv_params.weights_shape.i, 4);
+  std::string src_slice = "src_s + slices_sub_id";
+  if (src_slices % 2 != 0) {
+    src_slice = "min(" + src_slice + ", args.src.Slices() - 1)";
+  }
   for (int x = 0; x < kernel_params.x_block_size; x++) {
-    std::string patch = R"(
-    half4 s$0 = args.src.Read(SRC_X + $1, y, src_slice + slices_sub_id);
-)";
-    c += absl::Substitute(patch, x, x * 8);
+    std::string patch;
+    patch += "    half4 s$0 = args.src.Read(src_x$0, src_y, $1);\n";
+    std::string check;
+    if (!conv_params.x_kernel_is_1) {
+      check += "in_x" + std::to_string(x);
+    }
+    if (!conv_params.y_kernel_is_1) {
+      if (!check.empty()) {
+        check += " && ";
+      }
+      check += "in_y";
+    }
+    if (!check.empty()) {
+      patch += "    s$0 *= ucl::Convert<half>(" + check + ");\n";
+    }
+    c += absl::Substitute(patch, x, src_slice);
   }
   for (int s = 0; s < kernel_params.s_block_size; s++) {
     c += R"(
@@ -118,17 +166,20 @@ MAIN_FUNCTION($0) {
 )";
       c += absl::Substitute(patch, x, s * 2 + 0, s * 2 + 1);
     }
-    c += "    }";
+    c += "    }\n";
+  }
+  c += "  }\n";
+  if (!conv_params.x_kernel_is_1) {
+    c += "  }\n";
+  }
+  if (!conv_params.y_kernel_is_1) {
+    c += "  }\n";
   }
   c += R"(
-  }
-
   int DST_S = subgroup_dst_s_base + subgroup_local_id % 4;
   int dst_s_final = 0;
 )";
-  c += "  int DST_X = subgroup_id * " +
-       std::to_string(kernel_params.x_block_size * 8) +
-       " + x_sub_id / 2 * 2;\n";
+  c += "  int DST_X = subgroup_base_x + x_sub_id / 2 * 2;\n";
   for (int s = 0; s < kernel_params.s_block_size; s++) {
     for (int x = 0; x < kernel_params.x_block_size; x++) {
       std::string patch = R"(
@@ -137,12 +188,12 @@ MAIN_FUNCTION($0) {
     int dst_x_final = DST_X + $0 * 8 + 0;
     if (dst_x_final < args.dst.Width()) {
       half4 R = (half4)(r_w$0_s$1.x, r_w$0_s$1.y, r_w$0_s$2.x, r_w$0_s$2.y);
-      args.dst.Write(R, dst_x_final, y, dst_s_final);
+      args.dst.Write(R, dst_x_final, dst_y, dst_s_final);
     }
     dst_x_final = DST_X + $0 * 8 + 1;
     if (dst_x_final < args.dst.Width()) {
       half4 R = (half4)(r_w$0_s$1.z, r_w$0_s$1.w, r_w$0_s$2.z, r_w$0_s$2.w);
-      args.dst.Write(R, dst_x_final, y, dst_s_final);
+      args.dst.Write(R, dst_x_final, dst_y, dst_s_final);
     }
   }
 )";
@@ -203,15 +254,33 @@ static std::vector<half> ReorderWeights(
   return out;
 }
 
+void AddXKernelParams(const Convolution2DAttributes& attr, GPUOperation* op) {
+  const OHWI& weights_shape = attr.GetWeightsShape();
+  op->args_.AddInt("stride_x", attr.strides.w);
+  op->args_.AddInt("padding_x", -attr.padding.prepended.w);
+  op->args_.AddInt("kernel_size_x", weights_shape.w);
+  op->args_.AddInt("dilation_x", attr.dilations.w);
+}
+
+void AddYKernelParams(const Convolution2DAttributes& attr, GPUOperation* op) {
+  const OHWI& weights_shape = attr.GetWeightsShape();
+  op->args_.AddInt("stride_y", attr.strides.h);
+  op->args_.AddInt("padding_y", -attr.padding.prepended.h);
+  op->args_.AddInt("kernel_size_y", weights_shape.h);
+  op->args_.AddInt("dilation_y", attr.dilations.h);
+}
+
 }  // namespace
 
-ConvWaveMatrixMaliF16::ConvWaveMatrixMaliF16(const TensorDescriptor& src_desc,
-                                             const TensorDescriptor& dst_desc) {
+ConvWaveMatrixMaliF16::ConvWaveMatrixMaliF16(const ConvParams& conv_params,
+                                             const TensorDescriptor& src_desc,
+                                             const TensorDescriptor& dst_desc)
+    : conv_params_(conv_params) {
   kernel_params_.x_block_size = 2;
   kernel_params_.s_block_size = 2;
   kernel_params_.slices_first = false;
   work_group_size_ = int3(16, 1, 1);
-  code_ = GetCode(kernel_params_);
+  code_ = GetCode(conv_params_, kernel_params_);
   work_group_launch_order_ =
       kernel_params_.slices_first ? int3(1, 0, 2) : int3(0, 1, 2);
   compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
@@ -272,8 +341,18 @@ bool SupportsConvWaveMatrixMaliF16(const GpuInfo& gpu_info) {
 ConvWaveMatrixMaliF16 CreateConvWaveMatrixMaliF16(
     const TensorDescriptor& src_desc, const TensorDescriptor& dst_desc,
     const Convolution2DAttributes& attr) {
-  ConvWaveMatrixMaliF16 result = ConvWaveMatrixMaliF16(src_desc, dst_desc);
+  ConvWaveMatrixMaliF16::ConvParams conv_params;
+  conv_params.weights_shape = attr.GetWeightsShape();
+  conv_params.InitKernelXY(attr);
+  ConvWaveMatrixMaliF16 result =
+      ConvWaveMatrixMaliF16(conv_params, src_desc, dst_desc);
   result.AddWeights(GetFloatWeights(attr));
+  if (!conv_params.x_kernel_is_1) {
+    AddXKernelParams(attr, &result);
+  }
+  if (!conv_params.y_kernel_is_1) {
+    AddYKernelParams(attr, &result);
+  }
   return result;
 }
 

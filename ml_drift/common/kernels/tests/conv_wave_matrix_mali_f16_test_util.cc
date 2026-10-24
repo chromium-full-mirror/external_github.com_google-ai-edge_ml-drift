@@ -78,4 +78,27 @@ absl::Status ConvWaveMatrixMaliF161x1BigTest(TestExecutionEnvironment& env,
                                    dst_desc);
 }
 
+absl::Status ConvWaveMatrixMaliF16BigTest(TestExecutionEnvironment& env,
+                                          TensorStorageType storage) {
+  const int src_channels = 11;
+  const int dst_channels = 27;
+  auto weights = MakeSyntheticTensor(OHWI(dst_channels, 2, 3, src_channels));
+  Convolution2DAttributes attr;
+  attr.padding.prepended = HW(1, 0);
+  attr.padding.appended = HW(0, 1);
+  attr.strides = HW(1, 2);
+  attr.dilations = HW(2, 1);
+  attr.weights = weights;
+  attr.bias = MakeZeroTensor(Linear(dst_channels));
+
+  auto src_shape = BHWC(1, 9, 17, src_channels);
+
+  TensorFloat32 src_tensor = MakeSyntheticTensor(src_shape);
+
+  TensorDescriptor src_desc = {DataType::kFloat16, storage, Layout::kHWC};
+  TensorDescriptor dst_desc = {DataType::kFloat16, storage, Layout::kHWC};
+  return ConvWaveMatrixMaliF16Test(env, attr, weights, src_tensor, src_desc,
+                                   dst_desc);
+}
+
 }  // namespace ml_drift

@@ -32,6 +32,22 @@ namespace ml_drift {
 
 class ConvWaveMatrixMaliF16 : public GPUOperation {
  public:
+  struct ConvParams {
+    bool x_kernel_is_1 = true;
+    bool y_kernel_is_1 = true;
+    OHWI weights_shape;
+
+    void InitKernelXY(const Convolution2DAttributes& attr) {
+      const OHWI& weights_shape = attr.GetWeightsShape();
+      x_kernel_is_1 = weights_shape.w == 1 && attr.strides.w == 1 &&
+                      attr.dilations.w == 1 && attr.padding.prepended.w == 0 &&
+                      attr.padding.appended.w == 0;
+      y_kernel_is_1 = weights_shape.h == 1 && attr.strides.h == 1 &&
+                      attr.dilations.h == 1 && attr.padding.prepended.h == 0 &&
+                      attr.padding.appended.h == 0;
+    }
+  };
+
   struct KernelParams {
     int x_block_size = 1;
     int s_block_size = 1;
@@ -39,7 +55,8 @@ class ConvWaveMatrixMaliF16 : public GPUOperation {
   };
 
   ConvWaveMatrixMaliF16() = default;
-  ConvWaveMatrixMaliF16(const TensorDescriptor& src_desc,
+  ConvWaveMatrixMaliF16(const ConvParams& conv_params,
+                        const TensorDescriptor& src_desc,
                         const TensorDescriptor& dst_desc);
 
   std::vector<int3> GetPossibleKernelWorkGroups(
@@ -57,6 +74,7 @@ class ConvWaveMatrixMaliF16 : public GPUOperation {
   void AddWeights(const Tensor<OHWI, DataType::kFloat32>& weights);
 
  private:
+  ConvParams conv_params_;
   KernelParams kernel_params_;
 };
 
