@@ -189,12 +189,49 @@ std::string GetSecondPart(const GpuInfo& gpu_info, const OHWI& weights_shape,
   return c;
 }
 
+std::string GetQuantizeAndDequantizeCode(
+    const QuantizeAndDequantizeAttributes& attr, DataType type, int qdq_index,
+    const std::string& value_name, Arguments* args) {
+  QuantizeAndDequantizeAttributes adjusted_attr = attr;
+  const bool is_fp16 = type == DataType::kFloat16;
+  if (is_fp16 && attr.scale < 0.000062f) {
+    adjusted_attr.scale = 0.000062f;
+  }
+  const std::string prefix = absl::StrCat("qdq", qdq_index, "_");
+  const std::string min_name = prefix + "min";
+  const std::string max_name = prefix + "max";
+  const std::string scale_name = prefix + "scale";
+  args->AddFloat(min_name, adjusted_attr.min, type);
+  args->AddFloat(max_name, adjusted_attr.max, type);
+  args->AddFloat(scale_name, adjusted_attr.scale, type);
+  std::string c;
+  c += "        {\n";
+  c += "          Type clamped_val = min(ucl::Init<Type>(args." + max_name +
+       "), max(ucl::Init<Type>(args." + min_name + "), " + value_name + "));\n";
+  if (adjusted_attr.scale == 0.0f) {
+    c += "          Type quant_val = round((clamped_val - "
+         "ucl::Init<Type>(args." +
+         min_name + ")) / ucl::Init<Type>(args." + scale_name + "));\n";
+  } else {
+    const std::string inv_scale_name = prefix + "inv_scale";
+    args->AddFloat(inv_scale_name, 1.0f / adjusted_attr.scale, type);
+    c += "          Type quant_val = round((clamped_val - "
+         "ucl::Init<Type>(args." +
+         min_name + ")) * ucl::Init<Type>(args." + inv_scale_name + "));\n";
+  }
+  c += "          " + value_name + " = quant_val * ucl::Init<Type>(args." +
+       scale_name + ") + ucl::Init<Type>(args." + min_name + ");\n";
+  c += "        }\n";
+  return c;
+}
+
 std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
                                         const std::vector<Node*> nodes,
                                         const OHWI& weights_shape,
                                         const int3 wg_size, DataType type,
                                         const int2& block_size,
-                                        bool need_write_check = true) {
+                                        bool need_write_check = true,
+                                        Arguments* args = nullptr) {
   const int conv_i_slices = DivideRoundUp(weights_shape.i, 4);
   std::string c;
   c += "MAIN_FUNCTION($0) {\n";
@@ -214,6 +251,7 @@ std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
   Type value = ucl::Init<Type>(0.0f);
   if (interm_x >= 0 && interm_x < args.dst_tensor.Width() && interm_y >= 0 && interm_y < args.dst_tensor.Height()) {
 )";
+  int qdq_index = 0;
   for (auto* node : nodes) {
     const OperationType op_type = OperationTypeFromString(node->operation.type);
     if (op_type == OperationType::kResize) {
@@ -224,6 +262,12 @@ std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
     } else if (op_type == OperationType::kAdd) {
       c += "    value += args.add_tensor.Read(interm_x, interm_y, "
            "local_s);\n";
+    } else if (op_type == OperationType::kQuantizeAndDequantize &&
+               args != nullptr) {
+      auto qdq_attr = std::any_cast<QuantizeAndDequantizeAttributes>(
+          node->operation.attributes);
+      c += GetQuantizeAndDequantizeCode(qdq_attr, type, qdq_index++, "value",
+                                        args);
     } else if (op_type == OperationType::kConcat) {
       c += "    value.x = args.src_tensor0.Read(interm_x, interm_y, 0).x;\n";
       c += "    value.y = args.src_tensor1.Read(interm_x, interm_y, 0).x;\n";
@@ -280,7 +324,8 @@ std::string GetCodeWGSecondTensorPrecise(const GpuInfo& gpu_info,
                                          const OHWI& weights_shape,
                                          const int3 wg_size, DataType type,
                                          const int2& block_size,
-                                         bool need_write_check = true) {
+                                         bool need_write_check = true,
+                                         Arguments* args = nullptr) {
   const int conv_i_slices = DivideRoundUp(weights_shape.i, 4);
   std::string c;
   c += "MAIN_FUNCTION($0) {\n";
@@ -314,6 +359,7 @@ std::string GetCodeWGSecondTensorPrecise(const GpuInfo& gpu_info,
       Type value = ucl::Init<Type>(0.0f);
       if (interm_x >= 0 && interm_x < args.dst_tensor.Width() && interm_y >= 0 && interm_y < args.dst_tensor.Height()) {
 )";
+  int qdq_index = 0;
   for (auto* node : nodes) {
     const OperationType op_type = OperationTypeFromString(node->operation.type);
     if (op_type == OperationType::kResize) {
@@ -324,6 +370,12 @@ std::string GetCodeWGSecondTensorPrecise(const GpuInfo& gpu_info,
     } else if (op_type == OperationType::kAdd) {
       c += "        value += args.add_tensor.Read(interm_x, interm_y, "
            "local_s);\n";
+    } else if (op_type == OperationType::kQuantizeAndDequantize &&
+               args != nullptr) {
+      auto qdq_attr = std::any_cast<QuantizeAndDequantizeAttributes>(
+          node->operation.attributes);
+      c += GetQuantizeAndDequantizeCode(qdq_attr, type, qdq_index++, "value",
+                                        args);
     } else if (op_type == OperationType::kConcat) {
       c +=
           "        value.x = args.src_tensor0.Read(interm_x, interm_y, 0).x;\n";
@@ -371,7 +423,8 @@ std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
                                         const OHWI& weights_shape,
                                         const int3 wg_size, DataType type,
                                         const int2& block_size,
-                                        bool need_write_check = true) {
+                                        bool need_write_check = true,
+                                        Arguments* args = nullptr) {
   const int conv_i_slices = DivideRoundUp(weights_shape.i, 4);
   std::string c;
   c += "MAIN_FUNCTION($0) {\n";
@@ -391,6 +444,7 @@ std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
   Type value = ucl::Init<Type>(0.0f);
   if (interm_x >= 0 && interm_x < args.dst_tensor.Width() && interm_y >= 0 && interm_y < args.dst_tensor.Height()) {
 )";
+  int qdq_index = 0;
   for (const auto* op : ops) {
     const OperationType op_type = OperationTypeFromString(op->name);
     if (op_type == OperationType::kResize) {
@@ -400,6 +454,11 @@ std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
     } else if (op_type == OperationType::kAdd) {
       c += "    value += args.add_tensor.Read(interm_x, interm_y, "
            "local_s);\n";
+    } else if (op_type == OperationType::kQuantizeAndDequantize &&
+               args != nullptr) {
+      auto qdq_attr = std::any_cast<QuantizeAndDequantizeAttributes>(op->attr);
+      c += GetQuantizeAndDequantizeCode(qdq_attr, type, qdq_index++, "value",
+                                        args);
     } else if (op_type == OperationType::kConcat) {
       c += "    value.x = args.src_tensor0.Read(interm_x, interm_y, 0).x;\n";
       c += "    value.y = args.src_tensor1.Read(interm_x, interm_y, 0).x;\n";
@@ -454,7 +513,8 @@ std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
 std::string GetCodeWGSecondTensorPrecise(
     const GpuInfo& gpu_info, const std::vector<const ir::IrOp*>& ops,
     const OHWI& weights_shape, const int3 wg_size, DataType type,
-    const int2& block_size, bool need_write_check = true) {
+    const int2& block_size, bool need_write_check = true,
+    Arguments* args = nullptr) {
   const int conv_i_slices = DivideRoundUp(weights_shape.i, 4);
   std::string c;
   c += "MAIN_FUNCTION($0) {\n";
@@ -488,6 +548,7 @@ std::string GetCodeWGSecondTensorPrecise(
       Type value = ucl::Init<Type>(0.0f);
       if (interm_x >= 0 && interm_x < args.dst_tensor.Width() && interm_y >= 0 && interm_y < args.dst_tensor.Height()) {
 )";
+  int qdq_index = 0;
   for (const auto* op : ops) {
     const OperationType op_type = OperationTypeFromString(op->name);
     if (op_type == OperationType::kResize) {
@@ -497,6 +558,11 @@ std::string GetCodeWGSecondTensorPrecise(
     } else if (op_type == OperationType::kAdd) {
       c += "        value += args.add_tensor.Read(interm_x, interm_y, "
            "local_s);\n";
+    } else if (op_type == OperationType::kQuantizeAndDequantize &&
+               args != nullptr) {
+      auto qdq_attr = std::any_cast<QuantizeAndDequantizeAttributes>(op->attr);
+      c += GetQuantizeAndDequantizeCode(qdq_attr, type, qdq_index++, "value",
+                                        args);
     } else if (op_type == OperationType::kConcat) {
       c +=
           "        value.x = args.src_tensor0.Read(interm_x, interm_y, 0).x;\n";
@@ -580,6 +646,24 @@ bool IsResizeAddConvLocalMemoryFuserRecommended(const GpuInfo& gpu_info) {
       gpu_info.IsPowerVR() && gpu_info.powervr_info.IsImgCxx();
   return is_apple_recommended || is_adreno_recommended || is_amd_recommended ||
          is_mali_recommended || is_powervr_recommended;
+}
+
+bool HasSingleQuantizeAndDequantizeConsumer(
+    const GraphFloat32& graph, ValueId val_id,
+    const std::vector<Node*>& consumers) {
+  return !graph.IsGraphOutput(val_id) && consumers.size() == 1 &&
+         consumers[0] != nullptr &&
+         OperationTypeFromString(consumers[0]->operation.type) ==
+             OperationType::kQuantizeAndDequantize;
+}
+
+bool HasSingleQuantizeAndDequantizeConsumer(
+    const ir::IrModel& ir_model, ir::IrTensorId val_id,
+    const std::vector<ir::IrOp*>& consumers) {
+  return !ir_model.IsGraphOutput(val_id) && consumers.size() == 1 &&
+         consumers[0] != nullptr &&
+         OperationTypeFromString(consumers[0]->name) ==
+             OperationType::kQuantizeAndDequantize;
 }
 
 }  // namespace
@@ -820,6 +904,13 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   auto resize_input = graph.FindInputs(resize_node->id)[0];
   auto resize_output = graph.FindOutputs(resize_node->id)[0];
   auto resize_consumers = graph.FindConsumers(resize_output->id);
+  std::vector<Node*> upload_nodes = {resize_node};
+  while (HasSingleQuantizeAndDequantizeConsumer(graph, resize_output->id,
+                                                resize_consumers)) {
+    upload_nodes.push_back(resize_consumers[0]);
+    resize_output = graph.FindOutputs(resize_consumers[0]->id)[0];
+    resize_consumers = graph.FindConsumers(resize_output->id);
+  }
   if (resize_consumers.size() != 1) {
     return absl::NotFoundError("ThinLocalMemoryFuser not suitable.");
   }
@@ -840,8 +931,15 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   }
   auto add_second_input =
       add_inputs[0]->id == resize_output->id ? add_inputs[1] : add_inputs[0];
+  upload_nodes.push_back(add_node);
   auto add_output_id = graph.FindOutputs(add_node->id)[0]->id;
   auto add_consumers = graph.FindConsumers(add_output_id);
+  while (HasSingleQuantizeAndDequantizeConsumer(graph, add_output_id,
+                                                add_consumers)) {
+    upload_nodes.push_back(add_consumers[0]);
+    add_output_id = graph.FindOutputs(add_consumers[0]->id)[0]->id;
+    add_consumers = graph.FindConsumers(add_output_id);
+  }
   if (add_consumers.size() != 1) {
     return absl::NotFoundError("ThinLocalMemoryFuser not suitable.");
   }
@@ -868,7 +966,7 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   ABSL_ASSIGN_OR_RETURN(auto src1_handle,
                         model_builder->GetTensor(add_second_input->id));
   ABSL_ASSIGN_OR_RETURN(auto dst_handle,
-                        model_builder->GetTensor(add_output_id));
+                        model_builder->GetTensor(conv_output->id));
 
   OperationDef op_def;
   op_def.src_tensors.push_back(src0_handle.tensor_desc);
@@ -993,9 +1091,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           conv_output->tensor.shape.h % operation.block_size_.y == 0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGFirstTensorPrecise(
-          gpu_info, std::vector<Node*>{resize_node, add_node},
+          gpu_info, upload_nodes,
           conv_weights.shape, operation.work_group_size_, data_type,
-          operation.block_size_, need_write_check);
+          operation.block_size_, need_write_check, &operation.args_);
       break;
     }
     case ThinLocalMemory::TilingType::kWGSecondTensorPrecise: {
@@ -1033,9 +1131,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           conv_output->tensor.shape.h % operation.block_size_.y == 0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGSecondTensorPrecise(
-          gpu_info, std::vector<Node*>{resize_node, add_node},
+          gpu_info, upload_nodes,
           conv_weights.shape, operation.work_group_size_, data_type,
-          operation.block_size_, need_write_check);
+          operation.block_size_, need_write_check, &operation.args_);
       break;
     }
   }
@@ -1056,8 +1154,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
       std::vector<ValueId>({conv_output->id}),
       std::make_unique<ThinLocalMemory>(std::move(operation)), op_name);
 
-  new_consumed_nodes->insert(resize_node->id);
-  new_consumed_nodes->insert(add_node->id);
+  for (auto* node : upload_nodes) {
+    new_consumed_nodes->insert(node->id);
+  }
   new_consumed_nodes->insert(conv_node->id);
   return absl::OkStatus();
 }
@@ -1283,6 +1382,13 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   auto resize_input = resize_op->inputs[0];
   auto resize_output = resize_op->outputs[0];
   auto resize_consumers = ir_model.FindConsumers(resize_output);
+  std::vector<const ir::IrOp*> upload_ops = {resize_op};
+  while (HasSingleQuantizeAndDequantizeConsumer(ir_model, resize_output,
+                                                resize_consumers)) {
+    upload_ops.push_back(resize_consumers[0]);
+    resize_output = resize_consumers[0]->outputs[0];
+    resize_consumers = ir_model.FindConsumers(resize_output);
+  }
   if (resize_consumers.size() != 1) {
     return absl::NotFoundError("ThinLocalMemoryFuser not suitable. 2");
   }
@@ -1300,8 +1406,15 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   }
   auto add_second_input =
       add_inputs[0] == resize_output ? add_inputs[1] : add_inputs[0];
+  upload_ops.push_back(add_op);
   auto add_output_id = add_op->outputs[0];
   auto add_consumers = ir_model.FindConsumers(add_output_id);
+  while (HasSingleQuantizeAndDequantizeConsumer(ir_model, add_output_id,
+                                                add_consumers)) {
+    upload_ops.push_back(add_consumers[0]);
+    add_output_id = add_consumers[0]->outputs[0];
+    add_consumers = ir_model.FindConsumers(add_output_id);
+  }
   if (add_consumers.size() != 1) {
     return absl::NotFoundError("ThinLocalMemoryFuser not suitable. 4");
   }
@@ -1332,7 +1445,7 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   }
   auto src1_handle = status2.value();
 
-  auto status3 = model_builder->GetTensor(add_output_id);
+  auto status3 = model_builder->GetTensor(conv_output);
   if (!status3.ok()) {
     return absl::NotFoundError("ThinLocalMemoryFuser not suitable. GetTensor3");
   }
@@ -1466,9 +1579,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGFirstTensorPrecise(
-          gpu_info, std::vector<const ir::IrOp*>{resize_op, add_op},
+          gpu_info, upload_ops,
           conv_weights.shape, operation.work_group_size_, data_type,
-          operation.block_size_, need_write_check);
+          operation.block_size_, need_write_check, &operation.args_);
       break;
     }
     case ThinLocalMemory::TilingType::kWGSecondTensorPrecise: {
@@ -1510,9 +1623,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGSecondTensorPrecise(
-          gpu_info, std::vector<const ir::IrOp*>{resize_op, add_op},
+          gpu_info, upload_ops,
           conv_weights.shape, operation.work_group_size_, data_type,
-          operation.block_size_, need_write_check);
+          operation.block_size_, need_write_check, &operation.args_);
       break;
     }
   }
@@ -1536,8 +1649,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           {static_cast<GpuModelBuilder::ValueId>(conv_output)}),
       std::make_unique<ThinLocalMemory>(std::move(operation)), op_name);
 
-  new_consumed_ops->insert(resize_op->id);
-  new_consumed_ops->insert(add_op->id);
+  for (const auto* op : upload_ops) {
+    new_consumed_ops->insert(op->id);
+  }
   new_consumed_ops->insert(conv_op->id);
   return absl::OkStatus();
 }
