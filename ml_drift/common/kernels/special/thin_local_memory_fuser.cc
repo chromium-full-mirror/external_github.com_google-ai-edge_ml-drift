@@ -225,8 +225,13 @@ std::string GetQuantizeAndDequantizeCode(
   return c;
 }
 
+struct NodeInfo {
+  OperationType type;
+  std::any attributes;
+};
+
 std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
-                                        const std::vector<Node*> nodes,
+                                        const std::vector<NodeInfo>& nodes,
                                         const OHWI& weights_shape,
                                         const int3 wg_size, DataType type,
                                         const int2& block_size,
@@ -252,23 +257,21 @@ std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
   if (interm_x >= 0 && interm_x < args.dst_tensor.Width() && interm_y >= 0 && interm_y < args.dst_tensor.Height()) {
 )";
   int qdq_index = 0;
-  for (auto* node : nodes) {
-    const OperationType op_type = OperationTypeFromString(node->operation.type);
-    if (op_type == OperationType::kResize) {
-      auto resize_attr =
-          std::any_cast<Resize2DAttributes>(node->operation.attributes);
+  for (const auto& node : nodes) {
+    if (node.type == OperationType::kResize) {
+      auto resize_attr = std::any_cast<Resize2DAttributes>(node.attributes);
       c += GetResize2dCode(resize_attr, "src_tensor", "interm_x", "interm_y",
                            "local_s", "value");
-    } else if (op_type == OperationType::kAdd) {
+    } else if (node.type == OperationType::kAdd) {
       c += "    value += args.add_tensor.Read(interm_x, interm_y, "
            "local_s);\n";
-    } else if (op_type == OperationType::kQuantizeAndDequantize &&
+    } else if (node.type == OperationType::kQuantizeAndDequantize &&
                args != nullptr) {
-      auto qdq_attr = std::any_cast<QuantizeAndDequantizeAttributes>(
-          node->operation.attributes);
+      auto qdq_attr =
+          std::any_cast<QuantizeAndDequantizeAttributes>(node.attributes);
       c += GetQuantizeAndDequantizeCode(qdq_attr, type, qdq_index++, "value",
                                         args);
-    } else if (op_type == OperationType::kConcat) {
+    } else if (node.type == OperationType::kConcat) {
       c += "    value.x = args.src_tensor0.Read(interm_x, interm_y, 0).x;\n";
       c += "    value.y = args.src_tensor1.Read(interm_x, interm_y, 0).x;\n";
       c += "    value.z = args.src_tensor2.Read(interm_x, interm_y, 0).x;\n";
@@ -320,7 +323,7 @@ std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
 }
 
 std::string GetCodeWGSecondTensorPrecise(const GpuInfo& gpu_info,
-                                         const std::vector<Node*> nodes,
+                                         const std::vector<NodeInfo>& nodes,
                                          const OHWI& weights_shape,
                                          const int3 wg_size, DataType type,
                                          const int2& block_size,
@@ -360,210 +363,21 @@ std::string GetCodeWGSecondTensorPrecise(const GpuInfo& gpu_info,
       if (interm_x >= 0 && interm_x < args.dst_tensor.Width() && interm_y >= 0 && interm_y < args.dst_tensor.Height()) {
 )";
   int qdq_index = 0;
-  for (auto* node : nodes) {
-    const OperationType op_type = OperationTypeFromString(node->operation.type);
-    if (op_type == OperationType::kResize) {
-      auto resize_attr =
-          std::any_cast<Resize2DAttributes>(node->operation.attributes);
+  for (const auto& node : nodes) {
+    if (node.type == OperationType::kResize) {
+      auto resize_attr = std::any_cast<Resize2DAttributes>(node.attributes);
       c += GetResize2dCode(resize_attr, "src_tensor", "interm_x", "interm_y",
                            "local_s", "value");
-    } else if (op_type == OperationType::kAdd) {
+    } else if (node.type == OperationType::kAdd) {
       c += "        value += args.add_tensor.Read(interm_x, interm_y, "
            "local_s);\n";
-    } else if (op_type == OperationType::kQuantizeAndDequantize &&
+    } else if (node.type == OperationType::kQuantizeAndDequantize &&
                args != nullptr) {
-      auto qdq_attr = std::any_cast<QuantizeAndDequantizeAttributes>(
-          node->operation.attributes);
+      auto qdq_attr =
+          std::any_cast<QuantizeAndDequantizeAttributes>(node.attributes);
       c += GetQuantizeAndDequantizeCode(qdq_attr, type, qdq_index++, "value",
                                         args);
-    } else if (op_type == OperationType::kConcat) {
-      c +=
-          "        value.x = args.src_tensor0.Read(interm_x, interm_y, 0).x;\n";
-      c +=
-          "        value.y = args.src_tensor1.Read(interm_x, interm_y, 0).x;\n";
-      c +=
-          "        value.z = args.src_tensor2.Read(interm_x, interm_y, 0).x;\n";
-    }
-  }
-  c += "  }\n";
-  if (conv_i_slices == 1) {
-    c += "      interm_tensor[interm_local_y][interm_local_x] = value;\n";
-  } else {
-    c += "      interm_tensor[local_s][interm_local_y][interm_local_x] = "
-         "value;\n";
-  }
-  c += "    }\n";
-  c += "  }\n";
-  c += "  ucl::SyncThreads<WorkGroup, Local>();\n";
-  c += R"(
-  int DST_X = ucl::GetGlobalId<0>() * BLOCK_SIZE_X;
-  int DST_Y = ucl::GetGlobalId<1>() * BLOCK_SIZE_Y;
-  if (DST_X >= args.dst_tensor.Width() || DST_Y >= args.dst_tensor.Height()) { return; }
-  int second_local_x = local_x;
-  int second_local_y = local_y;
-)";
-  c += GetSecondPart(gpu_info, weights_shape, block_size, type,
-                     need_write_check);
-  const int local_mem_size_x = wg_size.x * block_size.x + 2;
-  const int local_mem_size_y = wg_size.y * block_size.y + 2;
-  return absl::StrReplaceAll(
-      c, {{"LOCAL_MEM_SIZE_X", std::to_string(local_mem_size_x)},
-          {"LOCAL_MEM_SIZE_Y", std::to_string(local_mem_size_y)},
-          {"LOCAL_MEM_SIZE_S", std::to_string(conv_i_slices)},
-          {"WG_SIZE_X", std::to_string(wg_size.x)},
-          {"WG_SIZE_Y", std::to_string(wg_size.y)},
-          {"WG_SIZE_Z", std::to_string(wg_size.z)},
-          {"Type", ToUclDataType(type, 4)},
-          {"BLOCK_SIZE_X", std::to_string(block_size.x)},
-          {"BLOCK_SIZE_Y", std::to_string(block_size.y)}});
-}
-
-std::string GetCodeWGFirstTensorPrecise(const GpuInfo& gpu_info,
-                                        const std::vector<const ir::IrOp*>& ops,
-                                        const OHWI& weights_shape,
-                                        const int3 wg_size, DataType type,
-                                        const int2& block_size,
-                                        bool need_write_check = true,
-                                        Arguments* args = nullptr) {
-  const int conv_i_slices = DivideRoundUp(weights_shape.i, 4);
-  std::string c;
-  c += "MAIN_FUNCTION($0) {\n";
-  if (conv_i_slices == 1) {
-    c += "  __local Type interm_tensor[WG_SIZE_Y][WG_SIZE_X];\n";
-    c += "  int local_s = 0;\n";
-  } else {
-    c += "  __local Type interm_tensor[WG_SIZE_Z][WG_SIZE_Y][WG_SIZE_X];\n";
-    c += "  int local_s = ucl::GetLocalId<2>();\n";
-  }
-  c += R"(
-  int local_x = ucl::GetLocalId<0>();
-  int local_y = ucl::GetLocalId<1>();
-
-  int interm_x = (WG_SIZE_X - 2) * ucl::GetGroupId<0>() + local_x - 1;
-  int interm_y = (WG_SIZE_Y - 2) * ucl::GetGroupId<1>() + local_y - 1;
-  Type value = ucl::Init<Type>(0.0f);
-  if (interm_x >= 0 && interm_x < args.dst_tensor.Width() && interm_y >= 0 && interm_y < args.dst_tensor.Height()) {
-)";
-  int qdq_index = 0;
-  for (const auto* op : ops) {
-    const OperationType op_type = OperationTypeFromString(op->name);
-    if (op_type == OperationType::kResize) {
-      auto resize_attr = std::any_cast<Resize2DAttributes>(op->attr);
-      c += GetResize2dCode(resize_attr, "src_tensor", "interm_x", "interm_y",
-                           "local_s", "value");
-    } else if (op_type == OperationType::kAdd) {
-      c += "    value += args.add_tensor.Read(interm_x, interm_y, "
-           "local_s);\n";
-    } else if (op_type == OperationType::kQuantizeAndDequantize &&
-               args != nullptr) {
-      auto qdq_attr = std::any_cast<QuantizeAndDequantizeAttributes>(op->attr);
-      c += GetQuantizeAndDequantizeCode(qdq_attr, type, qdq_index++, "value",
-                                        args);
-    } else if (op_type == OperationType::kConcat) {
-      c += "    value.x = args.src_tensor0.Read(interm_x, interm_y, 0).x;\n";
-      c += "    value.y = args.src_tensor1.Read(interm_x, interm_y, 0).x;\n";
-      c += "    value.z = args.src_tensor2.Read(interm_x, interm_y, 0).x;\n";
-    }
-  }
-  c += "  }\n";
-  if (conv_i_slices == 1) {
-    c += "  interm_tensor[local_y][local_x] = value;\n";
-  } else {
-    c += "  interm_tensor[local_s][local_y][local_x] = value;\n";
-  }
-  c += "  ucl::SyncThreads<WorkGroup, Local>();\n";
-  if (conv_i_slices != 1) {
-    c += "  if (local_s != 0) { return; }\n";
-  }
-  if (block_size.x != 1 || block_size.y != 1) {
-    // linear remapping:
-    c += R"(
-  int local_id = local_y * WG_SIZE_X + local_x;
-  int second_local_id = local_id;
-  if (second_local_id >= (WG_SIZE_X - 2) * (WG_SIZE_Y - 2) / BLOCK_SIZE_X / BLOCK_SIZE_Y) { return; }
-  int second_local_x = second_local_id % ((WG_SIZE_X - 2) / BLOCK_SIZE_X);
-  int second_local_y = second_local_id / ((WG_SIZE_X - 2) / BLOCK_SIZE_X);
-)";
-  } else {
-    // 2d remapping:
-    c += R"(
-  // 2d remapping:
-  int second_local_x = local_x;
-  int second_local_y = local_y;
-  if (second_local_x >= (WG_SIZE_X - 2) || second_local_y >= (WG_SIZE_Y - 2)) { return; }
-)";
-  }
-  c += R"(
-  int DST_X = (WG_SIZE_X - 2) * ucl::GetGroupId<0>() + second_local_x * BLOCK_SIZE_X;
-  int DST_Y = (WG_SIZE_Y - 2) * ucl::GetGroupId<1>() + second_local_y * BLOCK_SIZE_Y;
-
-  if (DST_X >= args.dst_tensor.Width() || DST_Y >= args.dst_tensor.Height()) { return; }
-)";
-  c += GetSecondPart(gpu_info, weights_shape, block_size, type,
-                     need_write_check);
-  return absl::StrReplaceAll(c,
-                             {{"WG_SIZE_X", std::to_string(wg_size.x)},
-                              {"WG_SIZE_Y", std::to_string(wg_size.y)},
-                              {"WG_SIZE_Z", std::to_string(wg_size.z)},
-                              {"Type", ToUclDataType(type, 4)},
-                              {"BLOCK_SIZE_X", std::to_string(block_size.x)},
-                              {"BLOCK_SIZE_Y", std::to_string(block_size.y)}});
-}
-
-std::string GetCodeWGSecondTensorPrecise(
-    const GpuInfo& gpu_info, const std::vector<const ir::IrOp*>& ops,
-    const OHWI& weights_shape, const int3 wg_size, DataType type,
-    const int2& block_size, bool need_write_check = true,
-    Arguments* args = nullptr) {
-  const int conv_i_slices = DivideRoundUp(weights_shape.i, 4);
-  std::string c;
-  c += "MAIN_FUNCTION($0) {\n";
-  if (conv_i_slices == 1) {
-    c += "  __local Type interm_tensor[LOCAL_MEM_SIZE_Y][LOCAL_MEM_SIZE_X];\n";
-  } else {
-    c += "  __local Type "
-         "interm_tensor[LOCAL_MEM_SIZE_S][LOCAL_MEM_SIZE_Y][LOCAL_MEM_SIZE_X];"
-         "\n";
-  }
-  c += R"(
-  int local_x = ucl::GetLocalId<0>();
-  int local_y = ucl::GetLocalId<1>();
-  int local_id = local_y * WG_SIZE_X + local_x;
-  for (int tile_id = 0; tile_id < args.tiles_count; ++tile_id) {
-    int interm_linear_id = local_id + tile_id * WG_SIZE_Y * WG_SIZE_X;
-    if (interm_linear_id < LOCAL_MEM_SIZE_Y * LOCAL_MEM_SIZE_X * LOCAL_MEM_SIZE_S) {
-      int interm_local_x = interm_linear_id % LOCAL_MEM_SIZE_X;
-)";
-  if (conv_i_slices == 1) {
-    c += "      int interm_local_y = interm_linear_id / LOCAL_MEM_SIZE_X;\n";
-    c += "      int local_s = 0;\n";
-  } else {
-    c += "      interm_linear_id /= LOCAL_MEM_SIZE_X;\n";
-    c += "      int interm_local_y = interm_linear_id % LOCAL_MEM_SIZE_Y;\n";
-    c += "      int local_s = interm_linear_id / LOCAL_MEM_SIZE_Y;\n";
-  }
-  c += R"(
-      int interm_x = WG_SIZE_X * BLOCK_SIZE_X * ucl::GetGroupId<0>() + interm_local_x - 1;
-      int interm_y = WG_SIZE_Y * BLOCK_SIZE_Y * ucl::GetGroupId<1>() + interm_local_y - 1;
-      Type value = ucl::Init<Type>(0.0f);
-      if (interm_x >= 0 && interm_x < args.dst_tensor.Width() && interm_y >= 0 && interm_y < args.dst_tensor.Height()) {
-)";
-  int qdq_index = 0;
-  for (const auto* op : ops) {
-    const OperationType op_type = OperationTypeFromString(op->name);
-    if (op_type == OperationType::kResize) {
-      auto resize_attr = std::any_cast<Resize2DAttributes>(op->attr);
-      c += GetResize2dCode(resize_attr, "src_tensor", "interm_x", "interm_y",
-                           "local_s", "value");
-    } else if (op_type == OperationType::kAdd) {
-      c += "        value += args.add_tensor.Read(interm_x, interm_y, "
-           "local_s);\n";
-    } else if (op_type == OperationType::kQuantizeAndDequantize &&
-               args != nullptr) {
-      auto qdq_attr = std::any_cast<QuantizeAndDequantizeAttributes>(op->attr);
-      c += GetQuantizeAndDequantizeCode(qdq_attr, type, qdq_index++, "value",
-                                        args);
-    } else if (op_type == OperationType::kConcat) {
+    } else if (node.type == OperationType::kConcat) {
       c +=
           "        value.x = args.src_tensor0.Read(interm_x, interm_y, 0).x;\n";
       c +=
@@ -838,9 +652,10 @@ absl::Status TryConcatConvLocalMemoryFuser(
           conv_output->tensor.shape.h % operation.block_size_.y == 0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGFirstTensorPrecise(
-          gpu_info, std::vector<Node*>{concat_node}, conv_weights.shape,
-          operation.work_group_size_, data_type, operation.block_size_,
-          need_write_check);
+          gpu_info,
+          {{OperationType::kConcat, concat_node->operation.attributes}},
+          conv_weights.shape, operation.work_group_size_, data_type,
+          operation.block_size_, need_write_check);
       break;
     }
     case ThinLocalMemory::TilingType::kWGSecondTensorPrecise: {
@@ -860,9 +675,10 @@ absl::Status TryConcatConvLocalMemoryFuser(
           conv_output->tensor.shape.h % operation.block_size_.y == 0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGSecondTensorPrecise(
-          gpu_info, std::vector<Node*>{concat_node}, conv_weights.shape,
-          operation.work_group_size_, data_type, operation.block_size_,
-          need_write_check);
+          gpu_info,
+          {{OperationType::kConcat, concat_node->operation.attributes}},
+          conv_weights.shape, operation.work_group_size_, data_type,
+          operation.block_size_, need_write_check);
       break;
     }
   }
@@ -1048,6 +864,13 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   operation.AddSrcTensor("src_tensor", op_def.src_tensors[0]);
   operation.AddSrcTensor("add_tensor", op_def.src_tensors[1]);
   operation.AddDstTensor("dst_tensor", op_def.dst_tensors[0]);
+  std::vector<NodeInfo> upload_nodes_info;
+  upload_nodes_info.reserve(upload_nodes.size());
+  for (const auto* node : upload_nodes) {
+    upload_nodes_info.push_back(
+        {OperationTypeFromString(node->operation.type),
+         node->operation.attributes});
+  }
   switch (operation.tiling_type_) {
     case ThinLocalMemory::TilingType::kWGFirstTensorPrecise: {
       // work_group_size_.x - 2 must be divisible by block_size.x
@@ -1091,9 +914,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           conv_output->tensor.shape.h % operation.block_size_.y == 0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGFirstTensorPrecise(
-          gpu_info, upload_nodes,
-          conv_weights.shape, operation.work_group_size_, data_type,
-          operation.block_size_, need_write_check, &operation.args_);
+          gpu_info, upload_nodes_info, conv_weights.shape,
+          operation.work_group_size_, data_type, operation.block_size_,
+          need_write_check, &operation.args_);
       break;
     }
     case ThinLocalMemory::TilingType::kWGSecondTensorPrecise: {
@@ -1131,9 +954,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           conv_output->tensor.shape.h % operation.block_size_.y == 0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGSecondTensorPrecise(
-          gpu_info, upload_nodes,
-          conv_weights.shape, operation.work_group_size_, data_type,
-          operation.block_size_, need_write_check, &operation.args_);
+          gpu_info, upload_nodes_info, conv_weights.shape,
+          operation.work_group_size_, data_type, operation.block_size_,
+          need_write_check, &operation.args_);
       break;
     }
   }
@@ -1312,9 +1135,9 @@ absl::Status TryConcatConvLocalMemoryFuser(
           0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGFirstTensorPrecise(
-          gpu_info, std::vector<const ir::IrOp*>{concat_op}, conv_weights.shape,
-          operation.work_group_size_, data_type, operation.block_size_,
-          need_write_check);
+          gpu_info, {{OperationType::kConcat, concat_op->attr}},
+          conv_weights.shape, operation.work_group_size_, data_type,
+          operation.block_size_, need_write_check);
       break;
     }
     case ThinLocalMemory::TilingType::kWGSecondTensorPrecise: {
@@ -1338,9 +1161,9 @@ absl::Status TryConcatConvLocalMemoryFuser(
           0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGSecondTensorPrecise(
-          gpu_info, std::vector<const ir::IrOp*>{concat_op}, conv_weights.shape,
-          operation.work_group_size_, data_type, operation.block_size_,
-          need_write_check);
+          gpu_info, {{OperationType::kConcat, concat_op->attr}},
+          conv_weights.shape, operation.work_group_size_, data_type,
+          operation.block_size_, need_write_check);
       break;
     }
   }
@@ -1533,6 +1356,11 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   operation.AddSrcTensor("src_tensor", op_def.src_tensors[0]);
   operation.AddSrcTensor("add_tensor", op_def.src_tensors[1]);
   operation.AddDstTensor("dst_tensor", op_def.dst_tensors[0]);
+  std::vector<NodeInfo> upload_ops_info;
+  upload_ops_info.reserve(upload_ops.size());
+  for (const auto* op : upload_ops) {
+    upload_ops_info.push_back({OperationTypeFromString(op->name), op->attr});
+  }
 
   switch (operation.tiling_type_) {
     case ThinLocalMemory::TilingType::kWGFirstTensorPrecise: {
@@ -1579,9 +1407,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGFirstTensorPrecise(
-          gpu_info, upload_ops,
-          conv_weights.shape, operation.work_group_size_, data_type,
-          operation.block_size_, need_write_check, &operation.args_);
+          gpu_info, upload_ops_info, conv_weights.shape,
+          operation.work_group_size_, data_type, operation.block_size_,
+          need_write_check, &operation.args_);
       break;
     }
     case ThinLocalMemory::TilingType::kWGSecondTensorPrecise: {
@@ -1623,9 +1451,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           0;
       const bool need_write_check = !x_div_by_block || !y_div_by_block;
       operation.code_ = GetCodeWGSecondTensorPrecise(
-          gpu_info, upload_ops,
-          conv_weights.shape, operation.work_group_size_, data_type,
-          operation.block_size_, need_write_check, &operation.args_);
+          gpu_info, upload_ops_info, conv_weights.shape,
+          operation.work_group_size_, data_type, operation.block_size_,
+          need_write_check, &operation.args_);
       break;
     }
   }
