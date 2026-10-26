@@ -4620,7 +4620,7 @@ bool WeightsManager::ShouldOffloadPreparationToGPU(
   return num_elements >= threshold;
 }
 
-std::vector<WeightsManager::WeightsPrepOperationInfo>
+absl::StatusOr<std::vector<WeightsManager::WeightsPrepOperationInfo>>
 WeightsManager::ConvertWeightsPrepRequestsToOperations(
     const GpuInfo& gpu_info, std::vector<WeightsConversionRequest>&& requests) {
   std::vector<WeightsManager::WeightsPrepOperationInfo> conversion_operations;
@@ -4682,10 +4682,24 @@ WeightsManager::ConvertWeightsPrepRequestsToOperations(
       };
       conversion_operations.push_back(std::move(op_info));
     } else {
-      ABSL_LOG(FATAL) << absl::Substitute(
+      return absl::UnimplementedError(absl::Substitute(
           "The requested weights type $0 is not implemented yet.",
-          ToString(request.dst_weights_type));
-      return {};
+          ToString(request.dst_weights_type)));
+    }
+  }
+
+  // Fail early: some backends (e.g. WebGPU) only report oversized bindings
+  // asynchronously.
+  for (const auto& op_info : conversion_operations) {
+    ABSL_RETURN_IF_ERROR(op_info.src_desc.CanCreateTensorWithShape(
+        gpu_info, op_info.src_desc.GetBHWDCShape()))
+        << "Weights tensor " << op_info.main_model_weight_id
+        << " can not be prepared on GPU.";
+    for (const auto& dst_desc : op_info.dst_descs) {
+      ABSL_RETURN_IF_ERROR(
+          dst_desc.CanCreateTensorWithShape(gpu_info, dst_desc.GetBHWDCShape()))
+          << "Weights tensor " << op_info.main_model_weight_id
+          << " can not be prepared on GPU.";
     }
   }
   return conversion_operations;

@@ -812,7 +812,9 @@ class WeightsManager {
   std::vector<WeightsConversionRequest> weights_conversion_requests_;
 
   // Convert the collected weights conversion requests to GPU operations.
-  static std::vector<WeightsPrepOperationInfo>
+  // Returns an error if a source or destination tensor of a conversion exceeds
+  // the device limits, e.g. the max buffer size.
+  static absl::StatusOr<std::vector<WeightsPrepOperationInfo>>
   ConvertWeightsPrepRequestsToOperations(
       const GpuInfo& gpu_info,
       std::vector<WeightsConversionRequest>&& requests);
