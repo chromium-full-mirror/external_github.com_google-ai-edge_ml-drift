@@ -43,7 +43,8 @@ absl::Status ConvWaveMatrixMaliF16Test(
     const TensorDescriptor& dst_desc) {
   TensorFloat32 dst_ref_tensor = ConvolutionReference(attr, src_tensor);
 
-  auto operation = CreateConvWaveMatrixMaliF16(src_desc, dst_desc, attr);
+  auto operation = CreateConvWaveMatrixMaliF16(exec_env.GetGpuInfo(), src_desc,
+                                               dst_desc, attr);
   float eps =
       GetEpsilon(CalculationsPrecision::kF16, exec_env.GetGpuInfo(), attr);
   TensorFloat32 dst_tensor;

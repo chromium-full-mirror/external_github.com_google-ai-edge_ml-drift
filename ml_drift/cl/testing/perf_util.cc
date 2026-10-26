@@ -85,7 +85,7 @@ absl::Status TestConvolutionPerformance(const Convolution2DAttributes& attr,
   if (precision == CalculationsPrecision::kF16 &&
       SupportsConvWaveMatrixMaliF16(gpu_info)) {
     conv = std::make_unique<ConvWaveMatrixMaliF16>(CreateConvWaveMatrixMaliF16(
-        op_def.src_tensors[0], op_def.dst_tensors[0], attr));
+        gpu_info, op_def.src_tensors[0], op_def.dst_tensors[0], attr));
   } else if (IsConvWaveMemorySupported(gpu_info)) {
     conv = std::make_unique<ConvWaveMemory>(
         CreateConvWaveMemory(gpu_info, op_def, precision, attr, &dst_shape));

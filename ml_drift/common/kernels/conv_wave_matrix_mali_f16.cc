@@ -39,8 +39,10 @@
 
 namespace ml_drift {
 namespace {
-std::string GetCode(const ConvWaveMatrixMaliF16::ConvParams& conv_params,
-                    const ConvWaveMatrixMaliF16::KernelParams& kernel_params) {
+std::string GetCode(const GpuInfo& gpu_info,
+                    const ConvWaveMatrixMaliF16::ConvParams& conv_params,
+                    const ConvWaveMatrixMaliF16::KernelParams& kernel_params,
+                    const TensorDescriptor& src_desc) {
   auto GetGlobalID = [&](int id) {
     int3 wg_order = kernel_params.slices_first ? int3(1, 0, 2) : int3(0, 1, 2);
     int3 launch_remap;
@@ -103,8 +105,12 @@ MAIN_FUNCTION($0) {
     c += "  for (int ky = 0; ky < args.kernel_size_y; ++ky) {\n";
     c += "  int src_y = ky * args.dilation_y + dst_y * args.stride_y + "
          "args.padding_y;\n";
-    c += "  bool in_y = src_y >= 0 && src_y < args.src.Height();\n";
-    c += "  src_y = clamp(src_y, 0, args.src.Height() - 1);\n";
+    if (!src_desc.SupportsZeroClamp(Axis::kHeight, gpu_info)) {
+      c += "  bool in_y = src_y >= 0 && src_y < args.src.Height();\n";
+      if (!src_desc.CanReadOutOfBorder(Axis::kHeight, gpu_info)) {
+        c += "  src_y = clamp(src_y, 0, args.src.Height() - 1);\n";
+      }
+    }
   } else {
     c += "  int src_y = min(dst_y, args.src.Height() - 1);\n";
   }
@@ -115,9 +121,14 @@ MAIN_FUNCTION($0) {
       c += "  int " + src_x +
            " = kx * args.dilation_x + (subgroup_base_x + x_sub_id + " +
            std::to_string(x * 8) + ") * args.stride_x + args.padding_x;\n";
-      c += "  bool in_x" + std::to_string(x) + " = " + src_x + " >= 0 && " +
-           src_x + " < args.src.Width();\n";
-      c += "  " + src_x + " = clamp(" + src_x + ", 0, args.src.Width() - 1);\n";
+      if (!src_desc.SupportsZeroClamp(Axis::kWidth, gpu_info)) {
+        c += "  bool in_x" + std::to_string(x) + " = " + src_x + " >= 0 && " +
+             src_x + " < args.src.Width();\n";
+        if (!src_desc.CanReadOutOfBorder(Axis::kWidth, gpu_info)) {
+          c += "  " + src_x + " = clamp(" + src_x +
+               ", 0, args.src.Width() - 1);\n";
+        }
+      }
     }
   } else {
     for (int x = 0; x < kernel_params.x_block_size; x++) {
@@ -137,10 +148,12 @@ MAIN_FUNCTION($0) {
     std::string patch;
     patch += "    half4 s$0 = args.src.Read(src_x$0, src_y, $1);\n";
     std::string check;
-    if (!conv_params.x_kernel_is_1) {
+    if (!conv_params.x_kernel_is_1 &&
+        !src_desc.SupportsZeroClamp(Axis::kWidth, gpu_info)) {
       check += "in_x" + std::to_string(x);
     }
-    if (!conv_params.y_kernel_is_1) {
+    if (!conv_params.y_kernel_is_1 &&
+        !src_desc.SupportsZeroClamp(Axis::kHeight, gpu_info)) {
       if (!check.empty()) {
         check += " && ";
       }
@@ -181,11 +194,12 @@ MAIN_FUNCTION($0) {
 )";
   c += "  int DST_X = subgroup_base_x + x_sub_id / 2 * 2;\n";
   for (int s = 0; s < kernel_params.s_block_size; s++) {
+    c += "  dst_s_final = DST_S + " + std::to_string(s * 4) + ";\n";
+    c += "  if (dst_s_final < args.dst.Slices()) {\n";
+    c += "    int dst_x_final;\n";
     for (int x = 0; x < kernel_params.x_block_size; x++) {
       std::string patch = R"(
-  dst_s_final = DST_S + $3;
-  if (dst_s_final < args.dst.Slices()) {
-    int dst_x_final = DST_X + $0 * 8 + 0;
+    dst_x_final = DST_X + $0 * 8 + 0;
     if (dst_x_final < args.dst.Width()) {
       half4 R = (half4)(r_w$0_s$1.x, r_w$0_s$1.y, r_w$0_s$2.x, r_w$0_s$2.y);
       args.dst.Write(R, dst_x_final, dst_y, dst_s_final);
@@ -195,10 +209,10 @@ MAIN_FUNCTION($0) {
       half4 R = (half4)(r_w$0_s$1.z, r_w$0_s$1.w, r_w$0_s$2.z, r_w$0_s$2.w);
       args.dst.Write(R, dst_x_final, dst_y, dst_s_final);
     }
-  }
 )";
-      c += absl::Substitute(patch, x, s * 2 + 0, s * 2 + 1, s * 4);
+      c += absl::Substitute(patch, x, s * 2 + 0, s * 2 + 1);
     }
+    c += "  }\n";
   }
   c += "}\n";
   return c;
@@ -272,7 +286,8 @@ void AddYKernelParams(const Convolution2DAttributes& attr, GPUOperation* op) {
 
 }  // namespace
 
-ConvWaveMatrixMaliF16::ConvWaveMatrixMaliF16(const ConvParams& conv_params,
+ConvWaveMatrixMaliF16::ConvWaveMatrixMaliF16(const GpuInfo& gpu_info,
+                                             const ConvParams& conv_params,
                                              const TensorDescriptor& src_desc,
                                              const TensorDescriptor& dst_desc)
     : conv_params_(conv_params) {
@@ -280,7 +295,7 @@ ConvWaveMatrixMaliF16::ConvWaveMatrixMaliF16(const ConvParams& conv_params,
   kernel_params_.s_block_size = 2;
   kernel_params_.slices_first = false;
   work_group_size_ = int3(16, 1, 1);
-  code_ = GetCode(conv_params_, kernel_params_);
+  code_ = GetCode(gpu_info, conv_params_, kernel_params_, src_desc);
   work_group_launch_order_ =
       kernel_params_.slices_first ? int3(1, 0, 2) : int3(0, 1, 2);
   compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
@@ -339,13 +354,13 @@ bool SupportsConvWaveMatrixMaliF16(const GpuInfo& gpu_info) {
 }
 
 ConvWaveMatrixMaliF16 CreateConvWaveMatrixMaliF16(
-    const TensorDescriptor& src_desc, const TensorDescriptor& dst_desc,
-    const Convolution2DAttributes& attr) {
+    const GpuInfo& gpu_info, const TensorDescriptor& src_desc,
+    const TensorDescriptor& dst_desc, const Convolution2DAttributes& attr) {
   ConvWaveMatrixMaliF16::ConvParams conv_params;
   conv_params.weights_shape = attr.GetWeightsShape();
   conv_params.InitKernelXY(attr);
   ConvWaveMatrixMaliF16 result =
-      ConvWaveMatrixMaliF16(conv_params, src_desc, dst_desc);
+      ConvWaveMatrixMaliF16(gpu_info, conv_params, src_desc, dst_desc);
   result.AddWeights(GetFloatWeights(attr));
   if (!conv_params.x_kernel_is_1) {
     AddXKernelParams(attr, &result);

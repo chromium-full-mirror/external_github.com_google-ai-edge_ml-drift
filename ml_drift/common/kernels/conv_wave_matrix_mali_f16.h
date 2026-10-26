@@ -15,6 +15,7 @@
 #ifndef ML_DRIFT_COMMON_KERNELS_CONV_WAVE_MATRIX_MALI_F16_H_
 #define ML_DRIFT_COMMON_KERNELS_CONV_WAVE_MATRIX_MALI_F16_H_
 
+#include <string_view>
 #include <vector>
 
 #include "ml_drift/common/data_type.h"
@@ -55,7 +56,7 @@ class ConvWaveMatrixMaliF16 : public GPUOperation {
   };
 
   ConvWaveMatrixMaliF16() = default;
-  ConvWaveMatrixMaliF16(const ConvParams& conv_params,
+  ConvWaveMatrixMaliF16(const GpuInfo& gpu_info, const ConvParams& conv_params,
                         const TensorDescriptor& src_desc,
                         const TensorDescriptor& dst_desc);
 
@@ -64,6 +65,10 @@ class ConvWaveMatrixMaliF16 : public GPUOperation {
       const KernelInfo& kernel_info) const override;
 
   int3 GetGridSize() const override;
+
+  std::string_view GetDebugName() const override {
+    return "conv_wave_matrix_mali_f16";
+  }
 
   // Move only
   ConvWaveMatrixMaliF16(ConvWaveMatrixMaliF16&& kernel) = default;
@@ -81,8 +86,8 @@ class ConvWaveMatrixMaliF16 : public GPUOperation {
 bool SupportsConvWaveMatrixMaliF16(const GpuInfo& gpu_info);
 
 ConvWaveMatrixMaliF16 CreateConvWaveMatrixMaliF16(
-    const TensorDescriptor& src_desc, const TensorDescriptor& dst_desc,
-    const Convolution2DAttributes& attr);
+    const GpuInfo& gpu_info, const TensorDescriptor& src_desc,
+    const TensorDescriptor& dst_desc, const Convolution2DAttributes& attr);
 
 }  // namespace ml_drift
 
