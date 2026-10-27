@@ -16,7 +16,6 @@
 
 #include <memory>
 #include <utility>
-#include <variant>
 
 #include "ml_drift/common/data_type.h"
 #include "ml_drift/common/gpu_info.h"
@@ -25,6 +24,7 @@
 #include "ml_drift/common/kernels/conv_generic.h"
 #include "ml_drift/common/kernels/conv_wave_matrix.h"
 #include "ml_drift/common/kernels/conv_wave_matrix_mali.h"
+#include "ml_drift/common/kernels/conv_wave_matrix_mali_f16.h"
 #include "ml_drift/common/kernels/conv_wave_memory.h"
 #include "ml_drift/common/model_hints.h"
 #include "ml_drift/common/operations.h"
@@ -153,6 +153,12 @@ std::unique_ptr<GPUOperation> SelectConvolutionMali(
       IsConvConstantsSupported(gpu_info, precision, attr)) {
     ConvConstants conv = CreateConvConstants(gpu_info, op_def, precision, attr);
     return std::make_unique<ConvConstants>(std::move(conv));
+  } else if (SupportsConvWaveMatrixMaliF16(gpu_info) &&
+             precision == CalculationsPrecision::kF16 && attr.groups == 1 &&
+             !op_def.dst_tensors[0].HasAxis(Axis::kBatch)) {
+    ConvWaveMatrixMaliF16 conv = CreateConvWaveMatrixMaliF16(
+        gpu_info, op_def.src_tensors[0], op_def.dst_tensors[0], attr);
+    return std::make_unique<ConvWaveMatrixMaliF16>(std::move(conv));
   } else {
     ConvGeneric conv =
         CreateConvGeneric(gpu_info, op_def, precision, attr, &dst_shape);
