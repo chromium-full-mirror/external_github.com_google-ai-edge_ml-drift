@@ -915,7 +915,8 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
 
   const auto& conv_weights = GetFloatWeights(conv_attr);
   bool supported_weights_shape = conv_weights.shape == OHWI(1, 3, 3, 4);
-  if (conv_weights.shape == OHWI(4, 3, 3, 8)) {
+  if (conv_weights.shape == OHWI(3, 3, 3, 8) ||
+      conv_weights.shape == OHWI(4, 3, 3, 8)) {
     if (gpu_info.IsAdreno()) {
       supported_weights_shape = true;
     } else if (gpu_info.IsMali()) {
@@ -932,6 +933,12 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
       supported_weights_shape = true;
     }
   }
+  if (conv_weights.shape == OHWI(3, 3, 3, 16) ||
+      conv_weights.shape == OHWI(4, 3, 3, 16)) {
+    if (gpu_info.IsMali() && gpu_info.mali_info.IsMaliG2()) {
+      supported_weights_shape = true;
+    }
+  }
   if (!supported_weights_shape || conv_attr.strides != HW(1, 1) ||
       conv_attr.dilations != HW(1, 1) ||
       conv_attr.padding.prepended != HW(1, 1) ||
@@ -941,15 +948,21 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
 
   const DataType data_type = op_def.src_tensors[0].GetDataType();
   ThinLocalMemory operation;
-  if (conv_weights.shape == OHWI(4, 3, 3, 8)) {
-    std::vector<float> weights_reordered(4 * 3 * 3 * 8);
-    for (int i = 0; i < 8; ++i) {
+  if (conv_weights.shape.o != 1) {
+    const int dst_ch_aligned = AlignByN(conv_weights.shape.o, 4);
+    std::vector<float> weights_reordered(dst_ch_aligned * conv_weights.shape.h *
+                                             conv_weights.shape.w *
+                                             conv_weights.shape.i,
+                                         0.0f);
+    for (int i = 0; i < conv_weights.shape.i; ++i) {
       for (int ky = 0; ky < 3; ++ky) {
         for (int kx = 0; kx < 3; ++kx) {
-          for (int o = 0; o < 4; ++o) {
+          for (int o = 0; o < conv_weights.shape.o; ++o) {
             int w_index = conv_weights.shape.LinearIndex({o, ky, kx, i});
             float w_val = conv_weights.data[w_index];
-            weights_reordered[((ky * 3 + kx) * 8 + i) * 4 + o] = w_val;
+            weights_reordered[((ky * 3 + kx) * conv_weights.shape.i + i) *
+                                  dst_ch_aligned +
+                              o] = w_val;
           }
         }
       }
@@ -971,11 +984,13 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   operation.args_.AddFloat("scale_factor_x", scale_factor_x);
   operation.args_.AddFloat("scale_factor_y", scale_factor_y);
   operation.tiling_type_ = ThinLocalMemory::TilingType::kWGFirstTensorPrecise;
+  const int conv_i_slices = DivideRoundUp(conv_weights.shape.i, 4);
   if (gpu_info.IsMali()) {
     operation.tiling_type_ =
-        ThinLocalMemory::TilingType::kWGSecondTensorPrecise;
+        conv_i_slices == 4
+            ? ThinLocalMemory::TilingType::kWGFirstTensorPrecise
+            : ThinLocalMemory::TilingType::kWGSecondTensorPrecise;
   }
-  const int conv_i_slices = DivideRoundUp(conv_weights.shape.i, 4);
   if (conv_i_slices == 2 && gpu_info.IsApple()) {
     operation.tiling_type_ =
         ThinLocalMemory::TilingType::kWGSecondTensorPrecise;
@@ -986,9 +1001,8 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   std::vector<NodeInfo> upload_nodes_info;
   upload_nodes_info.reserve(upload_nodes.size());
   for (const auto* node : upload_nodes) {
-    upload_nodes_info.push_back(
-        {OperationTypeFromString(node->operation.type),
-         node->operation.attributes});
+    upload_nodes_info.push_back({OperationTypeFromString(node->operation.type),
+                                 node->operation.attributes});
   }
   switch (operation.tiling_type_) {
     case ThinLocalMemory::TilingType::kWGFirstTensorPrecise: {
@@ -1003,6 +1017,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
         } else if (conv_i_slices == 2) {
           operation.block_size_ = int2(2, 1);
           operation.work_group_size_ = int3(18, 18, 2);
+        } else if (conv_i_slices == 4) {
+          operation.block_size_ = int2(1, 2);
+          operation.work_group_size_ = int3(18, 14, 1);
         }
       }
       if (gpu_info.IsAdreno()) {
@@ -1059,6 +1076,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           } else if (conv_i_slices == 2) {
             operation.block_size_ = int2(2, 2);
             operation.work_group_size_ = int3(16, 8, 1);
+          } else if (conv_i_slices == 4) {
+            operation.block_size_ = int2(1, 1);
+            operation.work_group_size_ = int3(24, 16, 1);
           }
         }
       }
@@ -1410,7 +1430,8 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
 
   const auto& conv_weights = GetFloatWeights(conv_attr);
   bool supported_weights_shape = conv_weights.shape == OHWI(1, 3, 3, 4);
-  if (conv_weights.shape == OHWI(4, 3, 3, 8)) {
+  if (conv_weights.shape == OHWI(3, 3, 3, 8) ||
+      conv_weights.shape == OHWI(4, 3, 3, 8)) {
     if (gpu_info.IsAdreno()) {
       supported_weights_shape = true;
     } else if (gpu_info.IsMali()) {
@@ -1429,6 +1450,12 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
       supported_weights_shape = true;
     }
   }
+  if (conv_weights.shape == OHWI(3, 3, 3, 16) ||
+      conv_weights.shape == OHWI(4, 3, 3, 16)) {
+    if (gpu_info.IsMali() && gpu_info.mali_info.IsMaliG2()) {
+      supported_weights_shape = true;
+    }
+  }
   if (!supported_weights_shape || conv_attr.strides != HW(1, 1) ||
       conv_attr.dilations != HW(1, 1) ||
       conv_attr.padding.prepended != HW(1, 1) ||
@@ -1438,15 +1465,21 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
 
   const DataType data_type = op_def.src_tensors[0].GetDataType();
   ThinLocalMemory operation;
-  if (conv_weights.shape == OHWI(4, 3, 3, 8)) {
-    std::vector<float> weights_reordered(4 * 3 * 3 * 8);
-    for (int i = 0; i < 8; ++i) {
+  if (conv_weights.shape.o != 1) {
+    const int dst_ch_aligned = AlignByN(conv_weights.shape.o, 4);
+    std::vector<float> weights_reordered(dst_ch_aligned * conv_weights.shape.h *
+                                             conv_weights.shape.w *
+                                             conv_weights.shape.i,
+                                         0.0f);
+    for (int i = 0; i < conv_weights.shape.i; ++i) {
       for (int ky = 0; ky < 3; ++ky) {
         for (int kx = 0; kx < 3; ++kx) {
-          for (int o = 0; o < 4; ++o) {
+          for (int o = 0; o < conv_weights.shape.o; ++o) {
             int w_index = conv_weights.shape.LinearIndex({o, ky, kx, i});
             float w_val = conv_weights.data[w_index];
-            weights_reordered[((ky * 3 + kx) * 8 + i) * 4 + o] = w_val;
+            weights_reordered[((ky * 3 + kx) * conv_weights.shape.i + i) *
+                                  dst_ch_aligned +
+                              o] = w_val;
           }
         }
       }
@@ -1470,11 +1503,13 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
   operation.args_.AddFloat("scale_factor_x", scale_factor_x);
   operation.args_.AddFloat("scale_factor_y", scale_factor_y);
   operation.tiling_type_ = ThinLocalMemory::TilingType::kWGFirstTensorPrecise;
+  const int conv_i_slices = DivideRoundUp(conv_weights.shape.i, 4);
   if (gpu_info.IsMali()) {
     operation.tiling_type_ =
-        ThinLocalMemory::TilingType::kWGSecondTensorPrecise;
+        conv_i_slices == 4
+            ? ThinLocalMemory::TilingType::kWGFirstTensorPrecise
+            : ThinLocalMemory::TilingType::kWGSecondTensorPrecise;
   }
-  const int conv_i_slices = DivideRoundUp(conv_weights.shape.i, 4);
   if (conv_i_slices == 2 && gpu_info.IsApple()) {
     operation.tiling_type_ =
         ThinLocalMemory::TilingType::kWGSecondTensorPrecise;
@@ -1499,6 +1534,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
         } else if (conv_i_slices == 2) {
           operation.block_size_ = int2(2, 1);
           operation.work_group_size_ = int3(18, 18, 2);
+        } else if (conv_i_slices == 4) {
+          operation.block_size_ = int2(1, 2);
+          operation.work_group_size_ = int3(18, 14, 1);
         }
       }
       if (gpu_info.IsAdreno()) {
@@ -1559,6 +1597,9 @@ absl::Status TryResizeAddConvLocalMemoryFuser(
           } else if (conv_i_slices == 2) {
             operation.block_size_ = int2(2, 2);
             operation.work_group_size_ = int3(16, 8, 1);
+          } else if (conv_i_slices == 4) {
+            operation.block_size_ = int2(1, 1);
+            operation.work_group_size_ = int3(24, 16, 1);
           }
         }
       }

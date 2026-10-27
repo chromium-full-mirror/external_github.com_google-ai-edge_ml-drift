@@ -260,6 +260,17 @@ TEST_F(Test, PerfResizeAddConv1x3x3x4) {
                           BHWC(1, 3024, 4032, 4), op_def, /*perf_test=*/true));
 }
 
+TEST_F(Test, PerfResizeAddConv3x3x3x8) {
+  const DataType data_type = DataType::kFloat16;
+  OperationDef op_def;
+  op_def.src_tensors.push_back(
+      {data_type, TensorStorageType::kTexture2D, Layout::kHWC});
+  op_def.dst_tensors.push_back(
+      {data_type, TensorStorageType::kTexture2D, Layout::kHWC});
+  ABSL_EXPECT_OK(ResizeAddConv(exec_env, OHWI(3, 3, 3, 8), BHWC(1, 756, 1008, 8),
+                          BHWC(1, 1512, 2016, 8), op_def, /*perf_test=*/true));
+}
+
 TEST_F(Test, PerfResizeAddConv4x3x3x8) {
   const DataType data_type = DataType::kFloat16;
   OperationDef op_def;
@@ -269,6 +280,30 @@ TEST_F(Test, PerfResizeAddConv4x3x3x8) {
       {data_type, TensorStorageType::kTexture2D, Layout::kHWC});
   ABSL_EXPECT_OK(ResizeAddConv(exec_env, OHWI(4, 3, 3, 8), BHWC(1, 756, 1008, 8),
                           BHWC(1, 1512, 2016, 8), op_def, /*perf_test=*/true));
+}
+
+TEST_F(Test, PerfResizeAddConv3x3x3x16) {
+  const DataType data_type = DataType::kFloat16;
+  OperationDef op_def;
+  op_def.src_tensors.push_back(
+      {data_type, TensorStorageType::kTexture2D, Layout::kHWC});
+  op_def.dst_tensors.push_back(
+      {data_type, TensorStorageType::kTexture2D, Layout::kHWC});
+  ABSL_EXPECT_OK(ResizeAddConv(exec_env, OHWI(3, 3, 3, 16), BHWC(1, 1024, 1024, 16),
+                          BHWC(1, 2048, 2048, 16), op_def,
+                          /*perf_test=*/true));
+}
+
+TEST_F(Test, PerfResizeAddConv4x3x3x16) {
+  const DataType data_type = DataType::kFloat16;
+  OperationDef op_def;
+  op_def.src_tensors.push_back(
+      {data_type, TensorStorageType::kTexture2D, Layout::kHWC});
+  op_def.dst_tensors.push_back(
+      {data_type, TensorStorageType::kTexture2D, Layout::kHWC});
+  ABSL_EXPECT_OK(ResizeAddConv(exec_env, OHWI(4, 3, 3, 16), BHWC(1, 1024, 1024, 16),
+                          BHWC(1, 2048, 2048, 16), op_def,
+                          /*perf_test=*/true));
 }
 
 // Correctness tests. Parameterized.
@@ -284,6 +319,18 @@ TEST_P(DataTypeTest, ResizeAddConv1x3x3x4) {
                           BHWC(1, 62, 98, 4), op_def));
 }
 
+TEST_P(DataTypeTest, ResizeAddConv3x3x3x8) {
+  if (!exec_env->IsStorageSupported(storage(), data_type())) {
+    GTEST_SKIP() << "Unsupported data type: " << ToString(data_type())
+                 << " storage type: " << ToString(storage());
+  }
+  OperationDef op_def;
+  op_def.src_tensors.push_back({data_type(), storage(), Layout::kHWC});
+  op_def.dst_tensors.push_back({data_type(), storage(), Layout::kHWC});
+  ABSL_EXPECT_OK(ResizeAddConv(exec_env, OHWI(3, 3, 3, 8), BHWC(1, 31, 49, 8),
+                          BHWC(1, 62, 98, 8), op_def));
+}
+
 TEST_P(DataTypeTest, ResizeAddConv4x3x3x8) {
   if (!exec_env->IsStorageSupported(storage(), data_type())) {
     GTEST_SKIP() << "Unsupported data type: " << ToString(data_type())
@@ -294,6 +341,30 @@ TEST_P(DataTypeTest, ResizeAddConv4x3x3x8) {
   op_def.dst_tensors.push_back({data_type(), storage(), Layout::kHWC});
   ABSL_EXPECT_OK(ResizeAddConv(exec_env, OHWI(4, 3, 3, 8), BHWC(1, 31, 49, 8),
                           BHWC(1, 62, 98, 8), op_def));
+}
+
+TEST_P(DataTypeTest, ResizeAddConv3x3x3x16) {
+  if (!exec_env->IsStorageSupported(storage(), data_type())) {
+    GTEST_SKIP() << "Unsupported data type: " << ToString(data_type())
+                 << " storage type: " << ToString(storage());
+  }
+  OperationDef op_def;
+  op_def.src_tensors.push_back({data_type(), storage(), Layout::kHWC});
+  op_def.dst_tensors.push_back({data_type(), storage(), Layout::kHWC});
+  ABSL_EXPECT_OK(ResizeAddConv(exec_env, OHWI(3, 3, 3, 16), BHWC(1, 17, 29, 16),
+                          BHWC(1, 34, 58, 16), op_def));
+}
+
+TEST_P(DataTypeTest, ResizeAddConv4x3x3x16) {
+  if (!exec_env->IsStorageSupported(storage(), data_type())) {
+    GTEST_SKIP() << "Unsupported data type: " << ToString(data_type())
+                 << " storage type: " << ToString(storage());
+  }
+  OperationDef op_def;
+  op_def.src_tensors.push_back({data_type(), storage(), Layout::kHWC});
+  op_def.dst_tensors.push_back({data_type(), storage(), Layout::kHWC});
+  ABSL_EXPECT_OK(ResizeAddConv(exec_env, OHWI(4, 3, 3, 16), BHWC(1, 17, 29, 16),
+                          BHWC(1, 34, 58, 16), op_def));
 }
 
 TEST_P(DataTypeTest, ResizeQdqAddQdqConv1x3x3x4) {
