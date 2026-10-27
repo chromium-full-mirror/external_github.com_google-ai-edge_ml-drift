@@ -121,18 +121,13 @@ std::string ConvAppleMPP::GetKernelCode(const TensorDescriptor& src) const {
       conv_params_.weights_desc.layout == WeightsLayout::kOSpatialIOGroupI4O4;
   const bool quantized_weights =
       weights_conversion && SizeInBitsOf(conv_params_.weights_desc.type) <= 8;
-  const bool manual_src_reading =
-      conv_params_.softmax_input_activation ||
-      src.GetStorageType() != TensorStorageType::kBuffer ||
-      !src.IsCC4Layout() || !conv_params_.x_kernel_is_1 ||
-      !conv_params_.y_kernel_is_1;
-  const bool manual_k_tiling =
-      conv_params_.runtime_check.src_end_ch_index.has_value() ||
-      manual_src_reading || weights_conversion;
-  const int k_tile =
-      manual_k_tiling ? 32 : AlignByN(conv_params_.weights_shape.i, 4);
   const bool has_batch = src.HasAxis(Axis::kBatch);
   std::string c;
+  const int wg_size = 32 * kernel_params_.simdgroups;
+  ABSL_CHECK(wg_size % kernel_params_.m_tile == 0);
+  const int slices_per_wg = wg_size / kernel_params_.m_tile;
+  const int n_tile_slices = kernel_params_.n_tile / 4;
+  const int k_tile_slices = kernel_params_.k_tile / 4;
   c += "#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n";
   if (weights_conversion &&
       conv_params_.weights_data_type != DataType::kFloat16) {
@@ -191,9 +186,7 @@ MAIN_FUNCTION($0) {
          "return;\n";
   }
   if (weights_conversion) {
-    ABSL_CHECK(kernel_params_.n_tile == 64);
-    ABSL_CHECK(k_tile == 32);
-    ABSL_CHECK(kernel_params_.simdgroups == 4);
+    ABSL_CHECK(wg_size == n_tile_slices * k_tile_slices);
     const std::string w_loc_type =
         conv_params_.weights_data_type == DataType::kFloat16 ? "half"
                                                              : "int8_t";
@@ -206,11 +199,11 @@ MAIN_FUNCTION($0) {
   auto b_tile = tensor(w_loc, dextents<int, 2>(N_TILE, K_TILE));
 
   int loc_id = ucl::GetLocalId<0>();
-  int sub_i = loc_id / 16;
-  int sub_o = loc_id % 16;
+  int sub_i = loc_id / N_TILE_SLICES;
+  int sub_o = loc_id % N_TILE_SLICES;
 
   int w_o_slice = min(slice_tile_id * N_TILE_SLICES + sub_o, args.dst.Slices() - 1);
-  int w_stride = args.dst.Slices() * 8;
+  int w_stride = args.dst.Slices() * K_TILE_SLICES;
 )";
     const std::string batch_part =
         conv_params_.batched_weights ? "w_batch_id * args.src.Slices()" : "0";
@@ -257,7 +250,7 @@ MAIN_FUNCTION($0) {
     c += "  auto b_tensor = tensor(w_ptr, dextents<int, 2>(b_cols, b_rows));\n";
     c += "  auto b_tile = b_tensor.slice(slice_tile_id * N_TILE, 0);\n";
   }
-  if (manual_src_reading) {
+  if (kernel_params_.manual_src_reading) {
     if (has_batch) {
       c += "  args.src.SetBatchRef(dst_b);\n";
     }
@@ -324,7 +317,7 @@ MAIN_FUNCTION($0) {
   if (conv_params_.softmax_input_activation) {
     c += "  half2 exp_val = args.src_exp.Read(src_x, src_y, 0).xy;\n";
   }
-  if (manual_k_tiling) {
+  if (kernel_params_.manual_k_tiling) {
     c += "  for (int k = 0; k < " + src_end_slice + "; k += K_TILE_SLICES) {\n";
     if (weights_conversion) {
       if (conv_params_.weights_data_type == DataType::kFloat16) {
@@ -345,10 +338,10 @@ MAIN_FUNCTION($0) {
       c += R"(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // store it in i32o64 or half4 in i32o16
-    w_loc_x4[(sub_i * 4 + 0) * 16 + sub_o] = w0;
-    w_loc_x4[(sub_i * 4 + 1) * 16 + sub_o] = w1;
-    w_loc_x4[(sub_i * 4 + 2) * 16 + sub_o] = w2;
-    w_loc_x4[(sub_i * 4 + 3) * 16 + sub_o] = w3;
+    w_loc_x4[(sub_i * 4 + 0) * N_TILE_SLICES + sub_o] = w0;
+    w_loc_x4[(sub_i * 4 + 1) * N_TILE_SLICES + sub_o] = w1;
+    w_loc_x4[(sub_i * 4 + 2) * N_TILE_SLICES + sub_o] = w2;
+    w_loc_x4[(sub_i * 4 + 3) * N_TILE_SLICES + sub_o] = w3;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 )";
     } else {
@@ -359,7 +352,8 @@ MAIN_FUNCTION($0) {
         c += "    b_tile = b_tensor.slice(slice_tile_id * N_TILE, k * 4);\n";
       }
     }
-    if (manual_src_reading) {
+    if (kernel_params_.manual_src_reading) {
+      ABSL_CHECK(k_tile_slices % slices_per_wg == 0);
       c += R"(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     #pragma unroll_full
@@ -418,6 +412,7 @@ MAIN_FUNCTION($0) {
   if (conv_params_.runtime_check.packed_groups.has_value()) {
     c += "  if (dst_w >= w_group_offset + w_group_size) return;\n";
   }
+  ABSL_CHECK(n_tile_slices % slices_per_wg == 0);
   c += R"(
   for (int i = 0; i < N_TILE_SLICES / slices_per_wg; ++i) {
     int tile_n_id = i * slices_per_wg + sub_slice_id;
@@ -451,16 +446,16 @@ MAIN_FUNCTION($0) {
     spatial_size = "w_group_size";
   }
   const std::string mat_mul_mode =
-      manual_k_tiling
+      kernel_params_.manual_k_tiling
           ? "mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate"
           : "mpp::tensor_ops::matmul2d_descriptor::mode::multiply";
   absl::StrReplaceAll(
       {
           {"M_TILE", std::to_string(kernel_params_.m_tile)},
           {"N_TILE", std::to_string(kernel_params_.n_tile)},
-          {"N_TILE_SLICES", std::to_string(kernel_params_.n_tile / 4)},
-          {"K_TILE", std::to_string(k_tile)},
-          {"K_TILE_SLICES", std::to_string(k_tile / 4)},
+          {"N_TILE_SLICES", std::to_string(n_tile_slices)},
+          {"K_TILE", std::to_string(kernel_params_.k_tile)},
+          {"K_TILE_SLICES", std::to_string(k_tile_slices)},
           {"SIMDGROUPS", std::to_string(kernel_params_.simdgroups)},
           {"WG_SIZE", std::to_string(32 * kernel_params_.simdgroups)},
           {"Type", ToUclDataType(DataType::kFloat16, 4)},
@@ -480,7 +475,20 @@ MAIN_FUNCTION($0) {
 ConvAppleMPP::ConvAppleMPP(const TensorDescriptor& src,
                            const ConvParams& params, int m_tile, int n_tile)
     : conv_params_(params) {
+  kernel_params_.manual_src_reading =
+      conv_params_.softmax_input_activation ||
+      src.GetStorageType() != TensorStorageType::kBuffer ||
+      !src.IsCC4Layout() || !conv_params_.x_kernel_is_1 ||
+      !conv_params_.y_kernel_is_1;
+  const bool weights_conversion =
+      conv_params_.weights_desc.layout == WeightsLayout::kOSpatialIOGroupI4O4;
+  kernel_params_.manual_k_tiling =
+      conv_params_.runtime_check.src_end_ch_index.has_value() ||
+      kernel_params_.manual_src_reading || weights_conversion;
   kernel_params_.m_tile = m_tile;
+  kernel_params_.k_tile = kernel_params_.manual_k_tiling
+                              ? 32
+                              : AlignByN(conv_params_.weights_shape.i, 4);
   kernel_params_.n_tile = n_tile;
   kernel_params_.simdgroups = 4;
   work_group_size_ = int3(32 * kernel_params_.simdgroups, 1, 1);

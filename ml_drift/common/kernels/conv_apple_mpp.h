@@ -69,8 +69,11 @@ class ConvAppleMPP : public GPUOperation {
 
   struct KernelParams {
     int m_tile = 64;
+    int k_tile = 0;
     int n_tile = 64;
     int simdgroups = 4;
+    bool manual_k_tiling = false;
+    bool manual_src_reading = false;
   };
 
   ConvAppleMPP(const TensorDescriptor& src, const ConvParams& params,
