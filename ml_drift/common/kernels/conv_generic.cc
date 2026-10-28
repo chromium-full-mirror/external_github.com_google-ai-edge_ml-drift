@@ -530,11 +530,11 @@ class ConvCodeGenerator {
         }
       }
     }
-    const bool use_vec8 = UseVec8Accumulator();
-    const std::string acc_type =
-        ToUclDataType(GetAccumulatorType(), use_vec8 ? 8 : 4);
+    const std::string acc_type = ToUclDataType(
+        GetAccumulatorType(), kernel_params_.use_vec8_accum ? 8 : 4);
     const std::string zero_value = GetZeroValue(GetAccumulatorType());
-    for (int s = 0; s < block_size.w / (use_vec8 ? 2 : 1); ++s) {
+    for (int s = 0; s < block_size.w / (kernel_params_.use_vec8_accum ? 2 : 1);
+         ++s) {
       ForSpatial([&](int x, int y, int z) {
         c += "  " + acc_type + " r" + GenerateIdFull(x, y, z, s) +
              " = ucl::Init<" + acc_type + ">(" + zero_value + ");\n";
@@ -951,7 +951,7 @@ class ConvCodeGenerator {
               c += "  if (DST_X + " + xind +
                    " < w_group_offset + w_group_size) {\n";
             }
-            if (UseVec8Accumulator()) {
+            if (kernel_params_.use_vec8_accum) {
               const std::string id =
                   GenerateIdFull(xind, yind, zind, std::to_string(s / 2));
               std::string postfixes[] = {".s0123", ".s4567"};
@@ -1098,13 +1098,6 @@ class ConvCodeGenerator {
   bool NeedsWaveMemory() const {
     return kernel_params_.weights_upload_type ==
            ConvGeneric::WeightsUploadType::kWaveMemory;
-  }
-
-  // experimental, not fully supported
-  bool UseVec8Accumulator() {
-    return kernel_params_.weights_upload_type ==
-               ConvGeneric::WeightsUploadType::kIntelWave16MatMul &&
-           false;
   }
 
   std::string GenerateSrcDeclaration() {
@@ -1554,7 +1547,9 @@ class ConvCodeGenerator {
       });
       c += "    s += 1;\n";
     }
-    if (weights_conversion) {
+    if (weights_conversion && !kernel_params_.use_vec8_accum) {
+      // vec4 accumulators
+      // w_cache WeightsLayout::kBO16I16O4
       c += R"(
     ucl::SyncThreads<WorkGroup, Local>();
     w_cache[sub_o * 16 + sub_i * 4 + 0] = w0;
@@ -1568,12 +1563,38 @@ class ConvCodeGenerator {
         c += "    short4 " + w_name + " = as_short4(w_cache[simd_id + " +
              std::to_string(i * 16) + "]);\n";
       }
-    } else {
+    } else if (weights_conversion && kernel_params_.use_vec8_accum) {
+      // w_cache WeightsLayout::kBO8I16O8
+      c += R"(
+    ucl::SyncThreads<WorkGroup, Local>();
+    w_cache[((sub_o / 2) * 16 + sub_i * 4 + 0) * 2 + sub_o % 2] = w0;
+    w_cache[((sub_o / 2) * 16 + sub_i * 4 + 1) * 2 + sub_o % 2] = w1;
+    w_cache[((sub_o / 2) * 16 + sub_i * 4 + 2) * 2 + sub_o % 2] = w2;
+    w_cache[((sub_o / 2) * 16 + sub_i * 4 + 3) * 2 + sub_o % 2] = w3;
+    ucl::SyncThreads<WorkGroup, Local>();
+  )";
+      for (int i = 0; i < kernel_params_.block_size.w / 2; ++i) {
+        const std::string w_name = "W" + std::to_string(i);
+        c += "    short8 " + w_name +
+             " = ((__local short8*)w_cache)[simd_id + " +
+             std::to_string(i * 16) + "];\n";
+      }
+    } else if (!kernel_params_.use_vec8_accum) {
+      // vec4 accumulators
       for (int i = 0; i < kernel_params_.block_size.w; ++i) {
         const std::string w_name = "W" + std::to_string(i);
         c += "    short4 " + w_name +
              " = ((__global short4*)weights_offset)[simd_id + " +
              std::to_string(i * 16) + "];\n";
+      }
+    } else {
+      // kernel_params_.use_vec8_accum
+      for (int i = 0; i < kernel_params_.block_size.w / 2; ++i) {
+        const std::string w_name = "W" + std::to_string(i);
+        c += "    short8 " + w_name + " = as_short8(";
+        c += "intel_sub_group_block_read_us8(((__global "
+             "ushort*)weights_offset) + " +
+             std::to_string(i * 16 * 8) + "));\n";
       }
     }
     if (!weights_conversion) {
@@ -1594,7 +1615,9 @@ class ConvCodeGenerator {
     if (conv_params_.Is4Bit()) {
       function_name = "intel_sub_group_i4_i4_matrix_mad_k64";
     }
-    for (int i = 0; i < kernel_params_.block_size.w; ++i) {
+    const int num_blocks =
+        kernel_params_.block_size.w / (kernel_params_.use_vec8_accum ? 2 : 1);
+    for (int i = 0; i < num_blocks; ++i) {
       ForSpatial([&](int x, int y, int z) {
         const std::string r_name = "r" + GenerateIdFull(x, y, z, i);
         const std::string s_name = "S" + GenerateIdSpatial(x, y, z);
@@ -2304,6 +2327,8 @@ ConvGeneric::KernelParams GetKernelParamsIntel(
     kernel_params.work_group_size = int3(64, 1, 1);
     kernel_params.weights_upload_type =
         ConvGeneric::WeightsUploadType::kIntelWave16MatMul;
+    // enable in separate CL
+    // kernel_params.use_vec8_accum = true;
     const int task_size_spatial = dst_shape.w * dst_shape.b * dst_shape.h;
     const double task_size = 1.0 * task_size_spatial * conv_params.dst_slices;
     const double task_size_per_cu = task_size / gpu_info.GetComputeUnitsCount();
@@ -3218,21 +3243,29 @@ WeightsDescription GetWeightsDescription(
     WeightsDescription desc;
     desc.type = conv_params.weights_data_type;
     desc.layout = WeightsLayout::kCustomGroups;
-    if (conv_params.Is8Bit()) {
-      desc.group_sizes.push_back({Axis::kInputChannels, 2});
-    } else if (conv_params.Is4Bit()) {
-      desc.group_sizes.push_back({Axis::kInputChannels, 4});
-    }
-    desc.group_sizes.push_back({Axis::kOutputChannels, 4});
-    if (conv_params.Is8Bit()) {
-      // keep last block in i2o4i2 layout to work with gpu conversion kernel
-      desc.group_sizes.push_back({Axis::kInputChannels, 2});
-      desc.group_sizes.push_back({Axis::kInputChannels, 8});
+    if (kernel_params.use_vec8_accum) {
+      const int i_block_size =
+          16 * (16 / SizeInBitsOf(conv_params.weights_data_type));
+      desc.group_sizes.push_back({Axis::kInputChannels, i_block_size});
+      desc.group_sizes.push_back(
+          {Axis::kOutputChannels, 8 * kernel_params.block_size.w / 2});
     } else {
-      desc.group_sizes.push_back({Axis::kInputChannels, 16});
+      if (conv_params.Is8Bit()) {
+        desc.group_sizes.push_back({Axis::kInputChannels, 2});
+      } else if (conv_params.Is4Bit()) {
+        desc.group_sizes.push_back({Axis::kInputChannels, 4});
+      }
+      desc.group_sizes.push_back({Axis::kOutputChannels, 4});
+      if (conv_params.Is8Bit()) {
+        // keep last block in i2o4i2 layout to work with gpu conversion kernel
+        desc.group_sizes.push_back({Axis::kInputChannels, 2});
+        desc.group_sizes.push_back({Axis::kInputChannels, 8});
+      } else {
+        desc.group_sizes.push_back({Axis::kInputChannels, 16});
+      }
+      desc.group_sizes.push_back(
+          {Axis::kOutputChannels, kernel_params.block_size.w});
     }
-    desc.group_sizes.push_back(
-        {Axis::kOutputChannels, kernel_params.block_size.w});
     desc.group_sizes.push_back({Axis::kInputChannels, 0});
     if (conv_params.kernel_size.x != 1) {
       desc.group_sizes.push_back({Axis::kWidth, 0});
