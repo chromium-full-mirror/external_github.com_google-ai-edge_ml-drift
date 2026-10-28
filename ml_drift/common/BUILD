@@ -25,23 +25,6 @@ package(
     licenses = ["notice"],
 )
 
-cc_library(
-    name = "convert",
-    srcs = ["convert.cc"],
-    hdrs = ["convert.h"],
-    deps = [
-        ":data_type",
-        ":shape",
-        ":tensor",
-        ":types",
-        ":util",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:status_macros",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/types:span",
-    ],
-)
-
 exports_files(["custom_transformations.h"])
 
 cc_library(
@@ -161,6 +144,31 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "gpu_model_builder_moe_util",
+    srcs = ["gpu_model_builder_moe_util.cc"],
+    hdrs = ["gpu_model_builder_moe_util.h"],
+    deps = [
+        ":data_type",
+        ":gpu_model_builder",
+        ":operations",
+        ":precision",
+        ":shape",
+        ":tensor",
+        ":util",
+        "//ml_drift/common/kernels:conv_apple_mpp",
+        "//ml_drift/common/kernels:conv_generic",
+        "//ml_drift/common/kernels:conv_wave_matrix",
+        "//ml_drift/common/kernels:conv_wave_memory",
+        "//ml_drift/common/kernels:fully_connected",
+        "//ml_drift/common/kernels/special:experts_remap",
+        "//ml_drift/common/task:gpu_operation",
+        "//ml_drift/common/task:tensor_desc",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
 flatbuffer_cc_library(
     name = "gpu_model_cc_fbs",
     srcs = ["gpu_model.fbs"],
@@ -192,6 +200,7 @@ cc_library(
         ":precision",
         ":shape",
         ":tensor",
+        ":util",
         "//ml_drift/common/task:tensor_desc",
         "//ml_drift/common/task:testing_ref_ops",
         "//ml_drift/common/task:testing_util",
@@ -520,7 +529,7 @@ cc_library(
     ],
 )
 
-# TODO(impjdi): Add unit test for model_transformer.
+# TODO: Add unit test for model_transformer.
 
 cc_library(
     name = "tensor_handle",
@@ -612,7 +621,7 @@ cc_library(
     deps = [":data_type"],
 )
 
-# TODO(impjdi): Add unit test for operations.
+# TODO: Add unit test for operations.
 
 cc_library(
     name = "shape",
@@ -671,6 +680,10 @@ cc_library(
 cc_library(
     name = "types",
     hdrs = ["types.h"],
+    linkopts = select({
+        "//ml_drift:apple": ["-lc++abi"],
+        "//conditions:default": [],
+    }),
     deps = ["@fp16"],
 )
 
@@ -806,11 +819,11 @@ cc_library(
     name = "api_cl_gl_vk",
     srcs = ["api_cl_gl_vk.cc"],
     hdrs = ["api_cl_gl_vk.h"],
-    defines = ["CL_DELEGATE_NO_GL"],
     deps = [
         ":api_common",
         ":data_type",
         ":util",
+        "//ml_drift/gl:portable",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",

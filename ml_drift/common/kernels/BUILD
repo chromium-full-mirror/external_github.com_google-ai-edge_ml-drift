@@ -114,9 +114,11 @@ cc_library(
     srcs = ["conv_apple_mpp.cc"],
     hdrs = ["conv_apple_mpp.h"],
     deps = [
+        ":fully_connected_util",
         "//ml_drift/common:data_type",
         "//ml_drift/common:gpu_info",
         "//ml_drift/common:kernel_info",
+        "//ml_drift/common:operations",
         "//ml_drift/common:shape",
         "//ml_drift/common:tensor",
         "//ml_drift/common:types",
@@ -167,6 +169,7 @@ cc_library(
     srcs = ["conv_generic.cc"],
     hdrs = ["conv_generic.h"],
     deps = [
+        ":fully_connected_util",
         "//ml_drift/common:data_type",
         "//ml_drift/common:gpu_info",
         "//ml_drift/common:kernel_info",
@@ -200,6 +203,7 @@ cc_library(
     srcs = ["conv_wave_matrix.cc"],
     hdrs = ["conv_wave_matrix.h"],
     deps = [
+        ":fully_connected_util",
         "//ml_drift/common:data_type",
         "//ml_drift/common:flops_util",
         "//ml_drift/common:gpu_info",
@@ -248,6 +252,30 @@ cc_library(
         "//ml_drift/common/task:weights_layout",
         "//ml_drift/common/task:work_group_picking",
         "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "conv_wave_matrix_mali_f16",
+    srcs = ["conv_wave_matrix_mali_f16.cc"],
+    hdrs = ["conv_wave_matrix_mali_f16.h"],
+    deps = [
+        "//ml_drift/common:data_type",
+        "//ml_drift/common:gpu_info",
+        "//ml_drift/common:kernel_info",
+        "//ml_drift/common:operations",
+        "//ml_drift/common:shape",
+        "//ml_drift/common:tensor",
+        "//ml_drift/common:types",
+        "//ml_drift/common:util",
+        "//ml_drift/common/task:buffer_desc",
+        "//ml_drift/common/task:compiler_options",
+        "//ml_drift/common/task:gpu_object_desc",
+        "//ml_drift/common/task:gpu_operation",
+        "//ml_drift/common/task:tensor_desc",
+        "//ml_drift/common/task:tuning_type",
+        "//ml_drift/common/task:work_group_picking",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -653,21 +681,19 @@ cc_library(
         "//ml_drift/common:kernel_info",
         "//ml_drift/common:precision",
         "//ml_drift/common:shape",
-        "//ml_drift/common:tensor",
         "//ml_drift/common:types",
         "//ml_drift/common:util",
         "//ml_drift/common/task:arguments",
-        "//ml_drift/common/task:buffer_desc",
         "//ml_drift/common/task:compiler_options",
         "//ml_drift/common/task:gpu_operation",
         "//ml_drift/common/task:tensor_desc",
         "//ml_drift/common/task:tuning_type",
+        "//ml_drift/common/task:util",
         "//ml_drift/common/task:weights_conversion",
         "//ml_drift/common/task:weights_layout",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/types:span",
     ],
 )
 
@@ -678,6 +704,28 @@ exports_files(
     ],
     visibility = [
         "@//ml_drift_delegate/delegate/serialization_weight_cache:__pkg__",
+    ],
+)
+
+cc_library(
+    name = "fully_connected_oi",
+    srcs = ["fully_connected_oi.cc"],
+    hdrs = ["fully_connected_oi.h"],
+    deps = [
+        ":fully_connected_util",
+        "//ml_drift/common:data_type",
+        "//ml_drift/common:gpu_info",
+        "//ml_drift/common:kernel_info",
+        "//ml_drift/common:precision",
+        "//ml_drift/common:shape",
+        "//ml_drift/common:types",
+        "//ml_drift/common:util",
+        "//ml_drift/common/task:compiler_options",
+        "//ml_drift/common/task:gpu_operation",
+        "//ml_drift/common/task:tensor_desc",
+        "//ml_drift/common/task:tuning_type",
+        "//ml_drift/common/task:weights_layout",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -1208,6 +1256,8 @@ cc_library(
         "//ml_drift/common/task:tensor_desc",
         "//ml_drift/common/task:weights_conversion",
         "//ml_drift/common/task:weights_layout",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
     ],

@@ -34,12 +34,14 @@ target_link_libraries(mld_cl_testing_perf_util
     mld_common_kernels_conv_constants
     mld_common_kernels_conv_generic
     mld_common_kernels_conv_wave_matrix_mali
+    mld_common_kernels_conv_wave_matrix_mali_f16
     mld_common_kernels_conv_wave_memory
     mld_common_kernels_depthwise_conv
     mld_common_kernels_depthwise_conv_3x3
     mld_common_kernels_depthwise_conv_tiled
     mld_common_kernels_depthwise_conv_wave_memory
     mld_common_kernels_fully_connected
+    mld_common_kernels_fully_connected_oi
     mld_common_kernels_quantize_and_dequantize
     mld_common_kernels_softmax
     mld_common_kernels_special_conv_softmax_conv

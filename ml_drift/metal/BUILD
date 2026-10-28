@@ -1,6 +1,5 @@
 load("@flatbuffers//:build_defs.bzl", "flatbuffer_cc_library")
 load("@rules_cc//cc:defs.bzl", "objc_library")
-load("@tflite", "workspace_root")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -199,7 +198,13 @@ flatbuffer_cc_library(
     srcs = ["inference_context.fbs"],
     flatc_args = [
         "--scoped-enums",
-        "-I " + workspace_root,
+        "-I .",
+    ],
+    include_paths = [
+        "external/ml_drift",
+        "ml_drift",
+        "ml_drift/common",
+        "ml_drift/common/task",
     ],
     includes = [
         "//ml_drift/common:gpu_model_cc_fbs_includes",
@@ -390,6 +395,7 @@ objc_library(
         "//ml_drift/common/kernels:depthwise_conv_tiled",
         "//ml_drift/common/kernels:elementwise",
         "//ml_drift/common/kernels:fully_connected",
+        "//ml_drift/common/kernels:fully_connected_oi",
         "//ml_drift/common/kernels:quantize_and_dequantize",
         "//ml_drift/common/kernels:softmax",
         "//ml_drift/common/kernels:winograd",

@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <typeinfo>
 #include <utility>
 #include <vector>
@@ -152,15 +153,27 @@ class OpBase {
     return raw_op;
   }
   template <typename BuilderType>
-  void AddSrcTensor(BuilderType& graph, GPUOperation* op,
-                    const std::string& name, const TensorHandle& handle) const {
+  void AddSrcTensor(BuilderType& graph, GPUOperation* op, std::string_view name,
+                    const TensorHandle& handle) const {
     graph.AddSrcTensor(op, name, handle);
   }
 
   template <typename BuilderType>
-  void AddDstTensor(BuilderType& graph, GPUOperation* op,
-                    const std::string& name, const TensorHandle& handle) const {
+  void AddSrcBuffer(BuilderType& graph, GPUOperation* op, std::string_view name,
+                    const TensorHandle& handle, int element_size = 1) const {
+    graph.AddSrcBuffer(op, name, handle, element_size);
+  }
+
+  template <typename BuilderType>
+  void AddDstTensor(BuilderType& graph, GPUOperation* op, std::string_view name,
+                    const TensorHandle& handle) const {
     graph.AddDstTensor(op, name, handle);
+  }
+
+  template <typename BuilderType>
+  void AddDstBuffer(BuilderType& graph, GPUOperation* op, std::string_view name,
+                    const TensorHandle& handle, int element_size = 1) const {
+    graph.AddDstBuffer(op, name, handle, element_size);
   }
 };
 

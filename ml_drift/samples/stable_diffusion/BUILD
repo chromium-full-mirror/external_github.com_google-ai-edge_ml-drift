@@ -13,8 +13,21 @@
 # limitations under the License.
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test", "objc_library")
+load("//ml_drift:pytype.default.bzl", "pytype_strict_binary")
 
 package(licenses = ["notice"])
+
+# Extracts weights from a HuggingFace model (safetensors).
+# bazel run //ml_drift/samples/stable_diffusion:extract_weights -- --model_path=/tmp/v1-5-pruned-emaonly.safetensors --output_dir=/tmp/sd_1_5/
+pytype_strict_binary(
+    name = "extract_weights",
+    srcs = ["extract_weights.py"],
+    deps = [
+        "@pypi//numpy",
+        "@pypi//safetensors",
+        "@pypi//torch",
+    ],
+)
 
 cc_library(
     name = "libimagegenerator_gpu_so",
@@ -155,12 +168,10 @@ cc_binary(
         "//ml_drift/common:gpu_model_builder",
         "//ml_drift/common:model",
         "//ml_drift/common:model_hints",
-        "//ml_drift/common:operations",
         "//ml_drift/common:precision",
         "//ml_drift/common:shape",
         "//ml_drift/common:tensor",
         "//ml_drift/common/kernels:cast",
-        "//ml_drift/common/kernels:elementwise",
         "//ml_drift/common/kernels:random_philox",
         "//ml_drift/common/task:gpu_operation",
         "//ml_drift/common/task:tensor_desc",
@@ -182,32 +193,9 @@ cc_binary(
     name = "sd_gpu_opencl",
     srcs = ["sd_gpu_opencl.cc"],
     deps = [
-        ":autoencoder_kl_builder",
         ":diffuser",
-        ":text_guidance_builder",
-        ":unet_builder",
         ":util",
-        "//ml_drift/cl:cl_command_queue",
-        "//ml_drift/cl:cl_operation",
-        "//ml_drift/cl:environment",
-        "//ml_drift/cl:inference_context",
         "//ml_drift/cl:opencl_wrapper",
-        "//ml_drift/cl:tensor",
-        "//ml_drift/common:data_type",
-        "//ml_drift/common:gpu_model",
-        "//ml_drift/common:gpu_model_builder",
-        "//ml_drift/common:model",
-        "//ml_drift/common:model_hints",
-        "//ml_drift/common:operations",
-        "//ml_drift/common:precision",
-        "//ml_drift/common:shape",
-        "//ml_drift/common:tensor",
-        "//ml_drift/common:types",
-        "//ml_drift/common/kernels:cast",
-        "//ml_drift/common/kernels:elementwise",
-        "//ml_drift/common/task:gpu_operation",
-        "//ml_drift/common/task:profiling_info",
-        "//ml_drift/common/task:tensor_desc",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/strings",
@@ -320,7 +308,6 @@ cc_library(
         "//ml_drift/common:data_type",
         "//ml_drift/common:gpu_model",
         "//ml_drift/common:gpu_model_builder",
-        "//ml_drift/common:merge_nodes",
         "//ml_drift/common:model",
         "//ml_drift/common:model_hints",
         "//ml_drift/common:precision",

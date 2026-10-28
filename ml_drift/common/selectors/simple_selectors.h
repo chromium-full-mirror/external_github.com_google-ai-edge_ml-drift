@@ -87,9 +87,10 @@ void SelectDepthToSpace(const SpaceToDepthAttributes& attr,
                         const OperationDef& op_def,
                         std::unique_ptr<GPUOperation>* ptr);
 
-void SelectEmbeddingLookup(const EmbeddingLookupAttributes& attr,
-                           const OperationDef& op_def, const GpuInfo& gpu_info,
-                           std::unique_ptr<GPUOperation>* ptr);
+absl::Status SelectEmbeddingLookup(const EmbeddingLookupAttributes& attr,
+                                   const OperationDef& op_def,
+                                   const GpuInfo& gpu_info,
+                                   std::unique_ptr<GPUOperation>* ptr);
 
 void SelectSplit(const SplitAttributes& attr, const GpuInfo& gpu_info,
                  const std::vector<int>& channels, const OperationDef& op_def,
@@ -103,7 +104,7 @@ std::unique_ptr<GPUOperation> SelectWinograd3x3Forward(
 
 std::unique_ptr<GPUOperation> SelectWinograd3x3Backward(
     const GpuInfo& gpu_info, const OperationDef& op_def, int tile_size,
-    const Tensor<Linear, DataType::FLOAT32>& biases);
+    const Tensor<Linear, DataType::kFloat32>& biases);
 
 std::unique_ptr<GPUOperation> SelectQuantizeAndDequantize(
     const QuantizeAndDequantizeAttributes& attr, const OperationDef& op_def);

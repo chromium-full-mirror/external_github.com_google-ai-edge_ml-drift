@@ -105,7 +105,6 @@ cc_test(
     name = "cl_arguments_test",
     srcs = ["cl_arguments_test.cc"],
     linkstatic = True,
-    tags = mld_gpu_tests_tags(),
     deps = [
         ":cl_arguments",
         "//ml_drift/common:access_type",
@@ -283,6 +282,7 @@ cc_library(
         "//ml_drift/common/task:compiler_options",
         "//ml_drift/common/task:gpu_operation",
         "//ml_drift/common/task:tuning_type",
+        "//ml_drift/common/task:work_group_picking",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
@@ -384,6 +384,19 @@ cc_library(
 )
 
 cc_library(
+    name = "egl_sync",
+    srcs = ["egl_sync.cc"],
+    hdrs = ["egl_sync.h"],
+    defines = ["EGL_EGLEXT_PROTOTYPES"],
+    deps = [
+        "//ml_drift/gl:gl_call",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@egl_headers",
+    ],
+)
+
+cc_library(
     name = "environment",
     srcs = ["environment.cc"],
     hdrs = ["environment.h"],
@@ -401,6 +414,35 @@ cc_library(
         "@XNNPACK",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
+    ],
+)
+
+cc_library(
+    name = "gl_interop",
+    srcs = ["gl_interop.cc"],
+    hdrs = ["gl_interop.h"],
+    deps = [
+        ":cl_command_queue",
+        ":cl_context",
+        ":cl_device",
+        ":cl_event",
+        ":cl_memory",
+        ":egl_sync",
+        ":environment",
+        ":opencl_wrapper",
+        ":util",
+        "//ml_drift/common:access_type",
+        "//ml_drift/common:api_cl_gl_vk",
+        "//ml_drift/common:data_type",
+        "//ml_drift/common:spi",
+        "//ml_drift/gl:gl_call",
+        "//ml_drift/gl:gl_sync",
+        "//ml_drift/gl:portable",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/strings",
+        "@egl_headers",
+        "@opencl_headers",
     ],
 )
 
@@ -477,6 +519,7 @@ cc_test(
         "//ml_drift/common:gpu_model",
         "//ml_drift/common:gpu_model_builder",
         "//ml_drift/common:model",
+        "//ml_drift/common:operations",
         "//ml_drift/common:precision",
         "//ml_drift/common:shape",
         "//ml_drift/common:tensor",
@@ -635,7 +678,7 @@ cc_test(
         "noasan",
         "nomsan",
         "notsan",
-        "requires-gpu-nvidia",
+        "requires-gpu-sm90",
     ],
     deps = [
         ":environment",
@@ -709,7 +752,7 @@ cc_test(
         "noasan",
         "nomsan",
         "notsan",
-        "requires-gpu-nvidia",
+        "requires-gpu-sm90",
     ],
     deps = [
         ":cl_test",

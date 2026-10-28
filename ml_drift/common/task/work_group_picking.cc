@@ -361,29 +361,55 @@ int3 GetSimpleWorkGroupXYisMultipleK(int k, const int3& grid) {
 
 int3 GetWorkGroup(const int3& grid, const GpuInfo& gpu_info,
                   int max_total_size) {
+  if (gpu_info.GetMaxWorkGroupTotalSize() > 0) {
+    max_total_size =
+        std::min(max_total_size, gpu_info.GetMaxWorkGroupTotalSize());
+  }
   int wg_z = GetBiggestDividerWithPriority(grid.z, 8);
-  int wg_xy_size = max_total_size / wg_z;
+  if (gpu_info.GetMaxWorkGroupSizeForZ() > 0) {
+    wg_z = std::min(wg_z, gpu_info.GetMaxWorkGroupSizeForZ());
+  }
+  int wg_xy_size = std::max(1, max_total_size / wg_z);
   int wg_x = std::min(DivideRoundUp(grid.x, 2), wg_xy_size);
   if (grid.x == 1) {
     wg_x = 1;
   }
-  wg_x = std::min(wg_x, gpu_info.GetMaxWorkGroupSizeForX());
-  int wg_y = std::min(wg_xy_size / wg_x, grid.y);
-  wg_y = std::min(wg_y, gpu_info.GetMaxWorkGroupSizeForY());
-  if (wg_x * wg_y < max_total_size) {
-    wg_z = max_total_size / (wg_x * wg_y);
+  if (gpu_info.GetMaxWorkGroupSizeForX() > 0) {
+    wg_x = std::min(wg_x, gpu_info.GetMaxWorkGroupSizeForX());
   }
-  wg_z = std::min(wg_z, gpu_info.GetMaxWorkGroupSizeForZ());
+  int wg_y = std::min(std::max(1, wg_xy_size / wg_x), grid.y);
+  if (gpu_info.GetMaxWorkGroupSizeForY() > 0) {
+    wg_y = std::min(wg_y, gpu_info.GetMaxWorkGroupSizeForY());
+  }
+  if (wg_x * wg_y < max_total_size) {
+    wg_z = std::min(grid.z, max_total_size / (wg_x * wg_y));
+  }
+  if (gpu_info.GetMaxWorkGroupSizeForZ() > 0) {
+    wg_z = std::min(wg_z, gpu_info.GetMaxWorkGroupSizeForZ());
+  }
   return int3(wg_x, wg_y, wg_z);
 }
 
-int3 GetWorkGroupConv(const int3& grid, int max_size, int max_z_size) {
+int3 GetWorkGroupConv(const int3& grid, const GpuInfo& gpu_info, int max_size,
+                      int max_z_size) {
+  if (gpu_info.GetMaxWorkGroupTotalSize() > 0) {
+    max_size = std::min(max_size, gpu_info.GetMaxWorkGroupTotalSize());
+  }
   int wg_z = GetBiggestDivider(grid.z, max_z_size);
-  int wg_xy_size = std::min(256, max_size) / wg_z;
+  if (gpu_info.GetMaxWorkGroupSizeForZ() > 0) {
+    wg_z = std::min(wg_z, gpu_info.GetMaxWorkGroupSizeForZ());
+  }
+  int wg_xy_size = std::max(1, std::min(256, max_size) / wg_z);
   int wg_x = std::min(grid.x, wg_xy_size);
-  int wg_y = std::min(wg_xy_size / wg_x, grid.y);
+  if (gpu_info.GetMaxWorkGroupSizeForX() > 0) {
+    wg_x = std::min(wg_x, gpu_info.GetMaxWorkGroupSizeForX());
+  }
+  int wg_y = std::min(std::max(1, wg_xy_size / wg_x), grid.y);
   if (wg_y == grid.y && grid.y % 2 == 0) {
     wg_y = grid.y / 2;
+  }
+  if (gpu_info.GetMaxWorkGroupSizeForY() > 0) {
+    wg_y = std::min(wg_y, gpu_info.GetMaxWorkGroupSizeForY());
   }
   return int3(wg_x, wg_y, wg_z);
 }
@@ -431,7 +457,8 @@ std::vector<int3> GetWorkGroupsXMultipleOf(int multiplier,
   auto remove_too_big_sizes = [](std::vector<int>& possible_sizes, int max_size,
                                  int grid_size) {
     for (int i = 1; i < possible_sizes.size(); ++i) {
-      if (possible_sizes[i] > max_size || possible_sizes[i] >= grid_size * 2) {
+      if ((max_size > 0 && possible_sizes[i] > max_size) ||
+          possible_sizes[i] >= grid_size * 2) {
         possible_sizes.erase(possible_sizes.begin() + i, possible_sizes.end());
         break;
       }
@@ -496,8 +523,8 @@ std::vector<int3> GetPossibleWorkGroupsConv(TuningType tuning_type,
         max_z_size = gpu_info.adreno_info.IsAdreno3xx() ? 16 : 64;
       }
       max_z_size = std::min(max_z_size, gpu_info.GetMaxWorkGroupSizeForZ());
-      return {
-          GetWorkGroupConv(grid, kernel_info.max_work_group_size, max_z_size)};
+      return {GetWorkGroupConv(grid, gpu_info, kernel_info.max_work_group_size,
+                               max_z_size)};
     }
     case TuningType::kExhaustive:
       return GetWorkGroupsAlignedToGrid(gpu_info, kernel_info, grid);

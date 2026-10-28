@@ -1,0 +1,105 @@
+// Copyright 2026 The ML Drift Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "ml_drift/common/kernels/tests/conv_wave_matrix_mali_f16_test_util.h"
+
+#include <memory>
+#include <utility>
+
+#include "gmock/gmock.h"
+#include "absl/status/status.h"
+#include "absl/status/status_macros.h"
+#include "ml_drift/common/data_type.h"
+#include "ml_drift/common/kernels/conv_wave_matrix_mali_f16.h"
+#include "ml_drift/common/operations.h"
+#include "ml_drift/common/precision.h"
+#include "ml_drift/common/shape.h"
+#include "ml_drift/common/task/tensor_desc.h"
+#include "ml_drift/common/task/testing_ref_ops.h"
+#include "ml_drift/common/task/testing_util.h"
+#include "ml_drift/common/tensor.h"
+
+namespace ml_drift {
+
+using ::testing::FloatNear;
+using ::testing::Pointwise;
+
+namespace {
+absl::Status ConvWaveMatrixMaliF16Test(
+    TestExecutionEnvironment& exec_env, const Convolution2DAttributes& attr,
+    const Tensor<OHWI, DataType::kFloat32>& weights,
+    const TensorFloat32& src_tensor, const TensorDescriptor& src_desc,
+    const TensorDescriptor& dst_desc) {
+  TensorFloat32 dst_ref_tensor = ConvolutionReference(attr, src_tensor);
+
+  auto operation = CreateConvWaveMatrixMaliF16(exec_env.GetGpuInfo(), src_desc,
+                                               dst_desc, attr);
+  float eps =
+      GetEpsilon(CalculationsPrecision::kF16, exec_env.GetGpuInfo(), attr);
+  TensorFloat32 dst_tensor;
+  ABSL_RETURN_IF_ERROR(exec_env.ExecuteGPUOperation(
+      src_tensor, std::make_unique<ConvWaveMatrixMaliF16>(std::move(operation)),
+      dst_ref_tensor.shape, &dst_tensor));
+  EXPECT_THAT(dst_tensor.data, Pointwise(FloatNear(eps), dst_ref_tensor.data));
+  return absl::OkStatus();
+}
+}  // namespace
+
+absl::Status ConvWaveMatrixMaliF161x1BigTest(TestExecutionEnvironment& env,
+                                             TensorStorageType storage) {
+  const int src_channels = 32;
+  const int dst_channels = 64;
+  auto weights = MakeSyntheticTensor(OHWI(dst_channels, 1, 1, src_channels));
+  Convolution2DAttributes attr;
+  attr.padding.prepended = HW(0, 0);
+  attr.padding.appended = HW(0, 0);
+  attr.strides = HW(1, 1);
+  attr.dilations = HW(1, 1);
+  attr.weights = weights;
+  attr.bias = MakeZeroTensor(Linear(dst_channels));
+
+  auto src_shape = BHWC(1, 3, 17, src_channels);
+
+  TensorFloat32 src_tensor = MakeSyntheticTensor(src_shape);
+
+  TensorDescriptor src_desc = {DataType::kFloat16, storage, Layout::kHWC};
+  TensorDescriptor dst_desc = {DataType::kFloat16, storage, Layout::kHWC};
+  return ConvWaveMatrixMaliF16Test(env, attr, weights, src_tensor, src_desc,
+                                   dst_desc);
+}
+
+absl::Status ConvWaveMatrixMaliF16BigTest(TestExecutionEnvironment& env,
+                                          TensorStorageType storage) {
+  const int src_channels = 11;
+  const int dst_channels = 27;
+  auto weights = MakeSyntheticTensor(OHWI(dst_channels, 2, 3, src_channels));
+  Convolution2DAttributes attr;
+  attr.padding.prepended = HW(1, 0);
+  attr.padding.appended = HW(0, 1);
+  attr.strides = HW(1, 2);
+  attr.dilations = HW(2, 1);
+  attr.weights = weights;
+  attr.bias = MakeZeroTensor(Linear(dst_channels));
+
+  auto src_shape = BHWC(1, 9, 17, src_channels);
+
+  TensorFloat32 src_tensor = MakeSyntheticTensor(src_shape);
+
+  TensorDescriptor src_desc = {DataType::kFloat16, storage, Layout::kHWC};
+  TensorDescriptor dst_desc = {DataType::kFloat16, storage, Layout::kHWC};
+  return ConvWaveMatrixMaliF16Test(env, attr, weights, src_tensor, src_desc,
+                                   dst_desc);
+}
+
+}  // namespace ml_drift

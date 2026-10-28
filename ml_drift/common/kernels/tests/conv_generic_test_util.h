@@ -91,7 +91,8 @@ absl::Status ConvGenericExternalWi4Test(TestExecutionEnvironment& env,
                                         TensorStorageType storage,
                                         const BHWC& src_shape, int dst_channels,
                                         bool batched_weights = false,
-                                        int group_size = -1);
+                                        int group_size = -1,
+                                        bool has_zero_point = true);
 
 absl::Status ConvGenericExternalWi2Test(TestExecutionEnvironment& env,
                                         CalculationsPrecision precision,

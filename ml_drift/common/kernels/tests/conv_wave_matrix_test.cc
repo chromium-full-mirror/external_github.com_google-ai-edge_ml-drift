@@ -360,6 +360,26 @@ TEST_P(ConvWaveMatrixFloatTest, ConvWaveMatrixExternalBatchedGroupedWi4Test) {
   ABSL_ASSERT_OK(status);
 }
 
+TEST_P(ConvWaveMatrixFloatTest, ConvWaveMatrixExternalQ4_0Test) {
+  const DataType data_type = DeduceDataTypeFromPrecision(precision());
+  if (!exec_env->IsStorageSupported(storage(), data_type)) {
+    GTEST_SKIP() << "Unsupported data type: " << ToString(data_type)
+                 << " storage type: " << ToString(storage());
+  }
+  const BHWC src_shape(1, 1, 32, 128);
+  const int dst_channels = 64;
+  auto status = ConvWaveMatrixExternalWi4Test(*exec_env, precision(), storage(),
+                                              src_shape, dst_channels,
+                                              /*batched_weights=*/false,
+                                              /*group_size=*/32,
+                                              /*has_zero_point=*/false);
+  if (!status.ok() &&
+      absl::StrContains(status.message(), exec_env->SkipTestMessage())) {
+    GTEST_SKIP() << status.message();
+  }
+  ABSL_ASSERT_OK(status);
+}
+
 TEST_P(ConvWaveMatrixFloatTest, ConvWaveMatrixExternalWi2Test) {
   const DataType data_type = DeduceDataTypeFromPrecision(precision());
   if (!exec_env->IsStorageSupported(storage(), data_type)) {
@@ -496,12 +516,12 @@ class Int8Test : public testing::Test,
 
 TEST_P(Int8Test, ConvWaveMatrixInt8Test) {
   // Check dst storage. Check src storage w/i helper.
-  if (!exec_env->IsStorageSupported(dst_storage(), DataType::INT32)) {
+  if (!exec_env->IsStorageSupported(dst_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported dst storage type: " << ToString(dst_storage())
-                 << " data type: " << ToString(DataType::INT32);
-  } else if (!exec_env->IsStorageSupported(src_storage(), DataType::INT32)) {
+                 << " data type: " << ToString(DataType::kInt32);
+  } else if (!exec_env->IsStorageSupported(src_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported src storage type: " << ToString(src_storage())
-                 << " data type: " << ToString(DataType::INT32);
+                 << " data type: " << ToString(DataType::kInt32);
   }
   auto status = ConvWaveMatrixInt8Test(*exec_env, src_storage(), dst_storage());
   if (!status.ok() &&
@@ -512,12 +532,12 @@ TEST_P(Int8Test, ConvWaveMatrixInt8Test) {
 
 TEST_P(Int8Test, ConvWaveMatrixInt8ExternalWeightsTest) {
   // Check dst storage. Check src storage w/i helper.
-  if (!exec_env->IsStorageSupported(dst_storage(), DataType::INT32)) {
+  if (!exec_env->IsStorageSupported(dst_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported dst storage type: " << ToString(dst_storage())
-                 << " data type: " << ToString(DataType::INT32);
-  } else if (!exec_env->IsStorageSupported(src_storage(), DataType::INT32)) {
+                 << " data type: " << ToString(DataType::kInt32);
+  } else if (!exec_env->IsStorageSupported(src_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported src storage type: " << ToString(src_storage())
-                 << " data type: " << ToString(DataType::INT32);
+                 << " data type: " << ToString(DataType::kInt32);
   }
   auto status = ConvWaveMatrixInt8ExternalWeightsTest(*exec_env, src_storage(),
                                                       dst_storage());
@@ -530,12 +550,12 @@ TEST_P(Int8Test, ConvWaveMatrixInt8ExternalWeightsTest) {
 
 TEST_P(Int8Test, ConvWaveMatrixInt8WithSrcQuantizationTest) {
   // Check dst storage. Check src storage w/i helper.
-  if (!exec_env->IsStorageSupported(dst_storage(), DataType::INT32)) {
+  if (!exec_env->IsStorageSupported(dst_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported dst storage type: " << ToString(dst_storage())
-                 << " data type: " << ToString(DataType::INT32);
-  } else if (!exec_env->IsStorageSupported(src_storage(), DataType::INT32)) {
+                 << " data type: " << ToString(DataType::kInt32);
+  } else if (!exec_env->IsStorageSupported(src_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported src storage type: " << ToString(src_storage())
-                 << " data type: " << ToString(DataType::INT32);
+                 << " data type: " << ToString(DataType::kInt32);
   }
   auto status = ConvWaveMatrixInt8WithSrcQuantizationTest(
       *exec_env, src_storage(), dst_storage());

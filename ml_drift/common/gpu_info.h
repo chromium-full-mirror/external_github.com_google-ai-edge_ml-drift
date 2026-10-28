@@ -28,7 +28,7 @@ namespace ml_drift {
 
 // The VendorID returned by the GPU driver.
 enum class GpuVendor {
-  // go/keep-sorted start
+  // start
   kAMD,
   kApple,
   kBroadcom,
@@ -39,7 +39,7 @@ enum class GpuVendor {
   kNvidia,
   kPowerVR,
   kQualcomm,
-  // go/keep-sorted end
+  // end
   kUnknown
 };
 
@@ -55,6 +55,7 @@ enum class GpuApi {
 
 enum class AdrenoGpu {
   // Adreno 8xx series
+  kAdreno850,
   kAdreno840,
   kAdreno831,
   kAdreno830,
@@ -168,12 +169,12 @@ struct AdrenoInfo {
   int GetWaveSize(bool full_wave) const;
 
   // Not supported on some Adreno devices with specific driver version.
-  // b/131099086
+  //
   bool support_one_layer_texture_array = true;
   OpenClCompilerVersion cl_compiler_version;
   OpenGlDriverVersion opengl_driver_version;
 
-  // b/442857864
+  //
   bool IsGlDriverMajor615Minor88_97() const {
     return opengl_driver_version.major == 615 &&
            (opengl_driver_version.minor >= 88 &&
@@ -385,6 +386,9 @@ enum class MaliGpu {
   kG1Pro,
   kG1Premium,
   kG1Ultra,
+  kG2Pro,
+  kG2Premium,
+  kG2Ultra,
 };
 
 struct MaliInfo {
@@ -401,6 +405,7 @@ struct MaliInfo {
     kValhallV3 = 9,
     kValhallV4 = 10,
     kV5 = 11,
+    kV6 = 12,
   };
   MaliGpu gpu_version = MaliGpu::kUnknown;
   Gen generation = Gen::kUnknown;
@@ -418,31 +423,30 @@ struct MaliInfo {
   bool IsValhallGen3() const;
   bool IsValhallGen4() const;
   bool IsValhall() const;
-  bool IsGen5() const;
   bool IsMaliG1() const;
+  bool IsMaliG2() const;
 
   // returns approximate compute units count using GPU name
   int GetApproximateComputeUnitsCount() const;
 };
 
 enum class PowerVRGpu {
-  // Newer generation of IMG gpus
-  // Starting with B-series - all RTE with the exception of BXM:
-  kDXT,
-  kCXT,
-  kBXT,
-  kBXS,
-  kBXM,
-  kBXE,
-  // RTZ
-  kAXT,
-  kAXM,
-  kAXE,
-  // Older generation of rogue IMG gpus - all RTZ:
-  kRogue,
-  kRogueGm9xxx,
-  kRogueGe8xxx,
   kUnknown,
+  // Older generation of rogue IMG GPUs - all RTZ (GE8xxx and older have FP16
+  // precision issues; GM9xxx has improved accuracy):
+  kRogue,
+  kRogueGe8xxx,
+  kRogueGm9xxx,
+  // New generation of IMG GPUs after 2019:
+  kAXE,
+  kAXM,
+  kAXT,
+  kBXE,
+  kBXM,
+  kBXS,
+  kBXT,
+  kCXT,
+  kDXT,
 };
 
 struct PowerVRInfo {
@@ -468,6 +472,7 @@ struct PowerVRInfo {
   bool IsImgBxx() const;
   bool IsImgCxx() const;
   bool IsImgDxx() const;
+
   bool IsBetterThan(PowerVRGpu gpu) const;
 };
 
@@ -887,9 +892,9 @@ enum class IntelGeneration {
   kGen9,
   kGen10,
   kGen11,
-  kGen12,
-  kGen13,
-  kGen14,
+  kGen12,  // The Xe architecture is also called Gen 12.
+  kXe2,
+  kXe3,
 };
 
 struct IntelInfo {
@@ -897,8 +902,11 @@ struct IntelInfo {
   explicit IntelInfo(const std::string& gpu_description);
 
   IntelGeneration generation = IntelGeneration::kUnknown;
+  // Number of Xe-cores (4 if the product is not recognized).
+  int compute_units_count = 4;
 
   bool IsGenerationOrNewer(IntelGeneration gen) const;
+  int GetComputeUnitsCount() const;
 };
 
 enum class MaleoonGpu {
@@ -919,9 +927,9 @@ struct WaveMatMulOpDescriptor {
   int m_size = 0;
   int n_size = 0;
   int k_size = 0;
-  DataType left_type = DataType::UNKNOWN;
-  DataType right_type = DataType::UNKNOWN;
-  DataType result_type = DataType::UNKNOWN;
+  DataType left_type = DataType::kUnknown;
+  DataType right_type = DataType::kUnknown;
+  DataType result_type = DataType::kUnknown;
 
   bool operator==(const WaveMatMulOpDescriptor& d) const {
     return d.m_size == m_size && d.n_size == n_size && d.k_size == k_size &&
@@ -941,6 +949,9 @@ struct GpuInfo {
   bool IsIntel() const;
   bool IsMaleoon() const;
   bool IsLlvmPipe() const;
+
+  bool IsMobileGpu() const;
+  bool IsDesktopGpu() const;
 
   bool IsGlsl() const;
   bool IsGlslSupportsExplicitFp16() const;

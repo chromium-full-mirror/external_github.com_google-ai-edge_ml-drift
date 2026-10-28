@@ -43,12 +43,12 @@ TEST(RemoveSingleInputAdd, Smoke) {
 
   auto add_node = graph.NewNode();
   Value* output = nullptr;
-  ASSERT_TRUE(AddOutput(&graph, add_node, &output).ok());
-  add_node->operation.type = ToString(OperationType::ADD);
+  ABSL_ASSERT_OK(AddOutput(&graph, add_node, &output));
+  add_node->operation.type = ToString(OperationType::kAdd);
   add_node->operation.attributes = ElementwiseAttributes();
 
   Value* temp = nullptr;
-  ASSERT_TRUE(ConnectTwoNodes(&graph, first_node, add_node, &temp).ok());
+  ABSL_ASSERT_OK(ConnectTwoNodes(&graph, first_node, add_node, &temp));
   ASSERT_EQ(2, graph.nodes().size());
   ASSERT_EQ(3, graph.values().size());
 
@@ -71,14 +71,14 @@ TEST(RemoveSingleInputAdd, DoNotTrigger_LinearTensor) {
 
   auto add_node = graph.NewNode();
   Value* output = nullptr;
-  ASSERT_TRUE(AddOutput(&graph, add_node, &output).ok());
-  add_node->operation.type = ToString(OperationType::ADD);
+  ABSL_ASSERT_OK(AddOutput(&graph, add_node, &output));
+  add_node->operation.type = ToString(OperationType::kAdd);
   ElementwiseAttributes attr;
-  attr.param = Tensor<Linear, DataType::FLOAT32>();
+  attr.param = Tensor<Linear, DataType::kFloat32>();
   add_node->operation.attributes = attr;
 
   Value* temp = nullptr;
-  ASSERT_TRUE(ConnectTwoNodes(&graph, first_node, add_node, &temp).ok());
+  ABSL_ASSERT_OK(ConnectTwoNodes(&graph, first_node, add_node, &temp));
   ASSERT_EQ(2, graph.nodes().size());
   ASSERT_EQ(3, graph.values().size());
 
@@ -98,14 +98,14 @@ TEST(RemoveSingleInputAdd, DoNotTrigger_Scalar) {
 
   auto add_node = graph.NewNode();
   Value* output = nullptr;
-  ASSERT_TRUE(AddOutput(&graph, add_node, &output).ok());
-  add_node->operation.type = ToString(OperationType::ADD);
+  ABSL_ASSERT_OK(AddOutput(&graph, add_node, &output));
+  add_node->operation.type = ToString(OperationType::kAdd);
   ElementwiseAttributes attr;
   attr.param = 0.5f;
   add_node->operation.attributes = attr;
 
   Value* temp = nullptr;
-  ASSERT_TRUE(ConnectTwoNodes(&graph, first_node, add_node, &temp).ok());
+  ABSL_ASSERT_OK(ConnectTwoNodes(&graph, first_node, add_node, &temp));
   ASSERT_EQ(2, graph.nodes().size());
   ASSERT_EQ(3, graph.values().size());
 
@@ -127,13 +127,13 @@ TEST(RemoveSingleInputAdd, DoNotTrigger_Multiple) {
 
   auto add_node = graph.NewNode();
   Value* output = nullptr;
-  ASSERT_TRUE(AddOutput(&graph, add_node, &output).ok());
-  add_node->operation.type = ToString(OperationType::ADD);
+  ABSL_ASSERT_OK(AddOutput(&graph, add_node, &output));
+  add_node->operation.type = ToString(OperationType::kAdd);
 
   Value* temp_a = nullptr;
   Value* temp_b = nullptr;
-  ASSERT_TRUE(ConnectTwoNodes(&graph, node_a, add_node, &temp_a).ok());
-  ASSERT_TRUE(ConnectTwoNodes(&graph, node_b, add_node, &temp_b).ok());
+  ABSL_ASSERT_OK(ConnectTwoNodes(&graph, node_a, add_node, &temp_a));
+  ABSL_ASSERT_OK(ConnectTwoNodes(&graph, node_b, add_node, &temp_b));
   ASSERT_EQ(3, graph.nodes().size());
   ASSERT_EQ(4, graph.values().size());
 
@@ -153,16 +153,16 @@ TEST(RemoveDegenerateUpsampling, Smoke) {
 
   auto node_to_remove = graph.NewNode();
   Value* output = nullptr;
-  ASSERT_TRUE(AddOutput(&graph, node_to_remove, &output).ok());
+  ABSL_ASSERT_OK(AddOutput(&graph, node_to_remove, &output));
   output->tensor.shape = BHWC(1, 5, 5, 1);
-  node_to_remove->operation.type = ToString(OperationType::RESIZE);
+  node_to_remove->operation.type = ToString(OperationType::kResize);
   Resize2DAttributes attr;
   attr.new_shape = HW(5, 5);
-  attr.type = SamplingType::BILINEAR;
+  attr.type = SamplingType::kBilinear;
   node_to_remove->operation.attributes = attr;
 
   Value* link = nullptr;
-  ASSERT_TRUE(ConnectTwoNodes(&graph, first_node, node_to_remove, &link).ok());
+  ABSL_ASSERT_OK(ConnectTwoNodes(&graph, first_node, node_to_remove, &link));
   link->tensor.shape = output->tensor.shape;
   ASSERT_EQ(2, graph.nodes().size());
   ASSERT_EQ(3, graph.values().size());
@@ -189,7 +189,7 @@ TEST(RemoveIdentityReshape, Smoke) {
   Value* value1 = graph.NewValue();
 
   value0->tensor.shape = BHWC(1, 1, 1, 11);
-  simple_node->operation.type = ToString(OperationType::RESHAPE);
+  simple_node->operation.type = ToString(OperationType::kReshape);
   ReshapeAttributes attr;
   attr.new_shape = BHWC(1, 1, 1, 11);
   simple_node->operation.attributes = attr;
@@ -247,7 +247,7 @@ TEST(RemoveIdentityReshape, SkipWhenProducerAlreadyFedToReshapeConsumer) {
   Value* value1 = graph.NewValue();
 
   value0->tensor.shape = BHWC(1, 1, 1, 11);
-  simple_node->operation.type = ToString(OperationType::RESHAPE);
+  simple_node->operation.type = ToString(OperationType::kReshape);
   ReshapeAttributes attr;
   attr.new_shape = BHWC(1, 1, 1, 11);
   simple_node->operation.attributes = attr;
@@ -292,12 +292,12 @@ TEST(MergeConsecutiveReshapes, Smoke) {
   value1->tensor.shape = BHWC(1, 2, 2, 3);
   value2->tensor.shape = BHWC(1, 3, 2, 2);
 
-  reshape0->operation.type = ToString(OperationType::RESHAPE);
+  reshape0->operation.type = ToString(OperationType::kReshape);
   ReshapeAttributes attr0;
   attr0.new_shape = BHWC(1, 2, 2, 3);
   reshape0->operation.attributes = attr0;
 
-  reshape1->operation.type = ToString(OperationType::RESHAPE);
+  reshape1->operation.type = ToString(OperationType::kReshape);
   ReshapeAttributes attr1;
   attr1.new_shape = BHWC(1, 3, 2, 2);
   reshape1->operation.attributes = attr1;
@@ -343,12 +343,12 @@ TEST(MergeConsecutiveReshapes, CancellingReshapesWithRemoveIdentity) {
   value1->tensor.shape = BHWC(12, 1, 630, 630);
   value2->tensor.shape = BHWC(1, 12, 630, 630);
 
-  reshape0->operation.type = ToString(OperationType::RESHAPE);
+  reshape0->operation.type = ToString(OperationType::kReshape);
   ReshapeAttributes attr0;
   attr0.new_shape = BHWC(12, 1, 630, 630);
   reshape0->operation.attributes = attr0;
 
-  reshape1->operation.type = ToString(OperationType::RESHAPE);
+  reshape1->operation.type = ToString(OperationType::kReshape);
   ReshapeAttributes attr1;
   attr1.new_shape = BHWC(1, 12, 630, 630);
   reshape1->operation.attributes = attr1;
@@ -395,12 +395,12 @@ TEST(MergeConsecutiveReshapes, SkipWhenIntermediateHasMultipleConsumers) {
   value1->tensor.shape = BHWC(1, 2, 2, 3);
   value2->tensor.shape = BHWC(1, 3, 2, 2);
 
-  reshape0->operation.type = ToString(OperationType::RESHAPE);
+  reshape0->operation.type = ToString(OperationType::kReshape);
   ReshapeAttributes attr0;
   attr0.new_shape = BHWC(1, 2, 2, 3);
   reshape0->operation.attributes = attr0;
 
-  reshape1->operation.type = ToString(OperationType::RESHAPE);
+  reshape1->operation.type = ToString(OperationType::kReshape);
   ReshapeAttributes attr1;
   attr1.new_shape = BHWC(1, 3, 2, 2);
   reshape1->operation.attributes = attr1;
@@ -437,7 +437,7 @@ TEST(RemoveIdentityStridedSlice, Smoke) {
 
   value0->tensor.shape = BHWC(1, 1, 1, 11);
   value1->tensor.shape = BHWC(1, 1, 1, 11);
-  simple_node->operation.type = ToString(OperationType::SLICE);
+  simple_node->operation.type = ToString(OperationType::kSlice);
   SliceAttributes attr;
   attr.starts = BHWC(0, 0, 0, 0);
   attr.strides = BHWC(1, 1, 1, 1);
@@ -495,7 +495,7 @@ TEST(RemoveIdentityStridedSlice, OutputIsGraphOutputInputConsumedByFewNodes) {
   value1->tensor.shape = BHWC(1, 1, 1, 11);
   value2->tensor.shape = BHWC(1, 1, 1, 11);
   value3->tensor.shape = BHWC(1, 1, 1, 11);
-  slice_node->operation.type = ToString(OperationType::SLICE);
+  slice_node->operation.type = ToString(OperationType::kSlice);
   SliceAttributes attr;
   attr.starts = BHWC(0, 0, 0, 0);
   attr.strides = BHWC(1, 1, 1, 1);

@@ -71,7 +71,7 @@ class NoiseGenerator {
                        MetalSpatialTensor* dst) {
     ABSL_RETURN_IF_ERROR(metal_op_.SetInt("seed", seed));
     ABSL_RETURN_IF_ERROR(metal_op_.SetInt("seed2", seed));
-    metal_op_.SetDstTensor(dst, 0);
+    ABSL_RETURN_IF_ERROR(metal_op_.SetDstTensor(dst, 0));
     ABSL_RETURN_IF_ERROR(metal_op_.UpdateParams());
     id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
     metal_op_.Encode(encoder);
@@ -101,8 +101,8 @@ class Copier {
 
   absl::Status Execute(id<MTLCommandBuffer> command_buffer, MetalSpatialTensor* src,
                        MetalSpatialTensor* dst) {
-    metal_op_.SetSrcTensor(src, 0);
-    metal_op_.SetDstTensor(dst, 0);
+    ABSL_RETURN_IF_ERROR(metal_op_.SetSrcTensor(src, 0));
+    ABSL_RETURN_IF_ERROR(metal_op_.SetDstTensor(dst, 0));
     ABSL_RETURN_IF_ERROR(metal_op_.UpdateParams());
     id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
     metal_op_.Encode(encoder);
@@ -120,7 +120,7 @@ class TextGuidance {
     const auto& gpu_info = device->GetInfo();
 
     CreateGpuModelInfo create_info;
-    create_info.precision = CalculationsPrecision::F16;
+    create_info.precision = CalculationsPrecision::kF16;
     create_info.storage_type = GetFastestStorageType(gpu_info);
     create_info.hints.Add(ModelHints::kFastTuning);
     create_info.hints.Add(ModelHints::kNoWinogradOptimizations);
@@ -146,7 +146,7 @@ class TextGuidance {
 
   MetalSpatialTensor* GetGuidanceTensor() { return inference_context_.GetTensor(dst_.id); }
 
-  absl::Status SetInput(const ml_drift::Tensor<BHWC, DataType::INT32>& src) {
+  absl::Status SetInput(const ml_drift::Tensor<BHWC, DataType::kInt32>& src) {
     return inference_context_.SetInputTensor(src_.id, src);
   }
   absl::Status Execute(id<MTLCommandBuffer> command_buffer) {
@@ -165,7 +165,7 @@ class UNet {
     const auto& gpu_info = env->GetInfo();
 
     CreateGpuModelInfo create_info;
-    create_info.precision = CalculationsPrecision::F16;
+    create_info.precision = CalculationsPrecision::kF16;
     create_info.storage_type = GetFastestStorageType(gpu_info);
     create_info.hints.Add(ModelHints::kFastTuning);
     create_info.hints.Add(ModelHints::kNoWinogradOptimizations);
@@ -186,7 +186,7 @@ class UNet {
     GpuModelBuilder gpu_builder(gpu_info, create_info.hints, create_info.precision,
                                 create_info.storage_type);
 
-    index_val_ = gpu_builder.AddTensor(BHWC(1, 1, 1, 1), DataType::FLOAT32);
+    index_val_ = gpu_builder.AddTensor(1, 1, 1, 1, TensorStorageType::kBuffer, DataType::kFloat32);
     ABSL_ASSIGN_OR_RETURN(
         auto temb_res, gpu_builder.AppendOp(
                            "TembGeneration", {index_val_},
@@ -200,11 +200,15 @@ class UNet {
         /*text_proj_ptr=*/nullptr,
         /*masked_image_latent_ptr=*/nullptr, &eta0_, &eta1_, nullptr));
 
-    guidance_scale_ = gpu_builder.AddTensor(BHWC(1, 1, 1, 4), DataType::FLOAT32);
-    sqrt_alpha_ = gpu_builder.AddTensor(BHWC(1, 1, 1, 4), DataType::FLOAT32);
-    sqrt_alpha_prev_ = gpu_builder.AddTensor(BHWC(1, 1, 1, 4), DataType::FLOAT32);
-    sqrt_one_minus_alpha_ = gpu_builder.AddTensor(BHWC(1, 1, 1, 4), DataType::FLOAT32);
-    sqrt_one_minus_alpha_prev_ = gpu_builder.AddTensor(BHWC(1, 1, 1, 4), DataType::FLOAT32);
+    guidance_scale_ =
+        gpu_builder.AddTensor(1, 1, 1, 1, TensorStorageType::kBuffer, DataType::kFloat32);
+    sqrt_alpha_ = gpu_builder.AddTensor(1, 1, 1, 1, TensorStorageType::kBuffer, DataType::kFloat32);
+    sqrt_alpha_prev_ =
+        gpu_builder.AddTensor(1, 1, 1, 1, TensorStorageType::kBuffer, DataType::kFloat32);
+    sqrt_one_minus_alpha_ =
+        gpu_builder.AddTensor(1, 1, 1, 1, TensorStorageType::kBuffer, DataType::kFloat32);
+    sqrt_one_minus_alpha_prev_ =
+        gpu_builder.AddTensor(1, 1, 1, 1, TensorStorageType::kBuffer, DataType::kFloat32);
     src_input_ = src_;
     ABSL_ASSIGN_OR_RETURN(
         auto _step_res,
@@ -245,8 +249,8 @@ class UNet {
                        float sqrt_alpha, float sqrt_alpha_prev, float sqrt_one_minus_alpha,
                        float sqrt_one_minus_alpha_prev) {
     TensorFloat32 scalar_tensor;
-    scalar_tensor.shape = BHWC(1, 1, 1, 4);
-    scalar_tensor.data.resize(4, 0.0f);
+    scalar_tensor.shape = BHWC(1, 1, 1, 1);
+    scalar_tensor.data.resize(1, 0.0f);
     scalar_tensor.data[0] = static_cast<float>(step_index);
     ABSL_RETURN_IF_ERROR(inference_context_.SetInputTensor(index_val_.id, scalar_tensor));
     scalar_tensor.data[0] = guidance_scale;
@@ -280,7 +284,7 @@ class Decoder {
     const auto& gpu_info = device->GetInfo();
 
     CreateGpuModelInfo create_info;
-    create_info.precision = CalculationsPrecision::F16;
+    create_info.precision = CalculationsPrecision::kF16;
     create_info.storage_type = GetFastestStorageType(gpu_info);
     create_info.hints.Add(ModelHints::kFastTuning);
     create_info.hints.Add(ModelHints::kNoWinogradOptimizations);
@@ -331,7 +335,7 @@ absl::Status RunStableDiffusion(std::string weights_path) {
   MetalDevice device_;
   const auto& gpu_info = device_.GetInfo();
 
-  TensorDescriptor default_desc(DataType::FLOAT16, GetFastestStorageType(gpu_info), Layout::HWC);
+  TensorDescriptor default_desc(DataType::kFloat16, GetFastestStorageType(gpu_info), Layout::kHWC);
 
   TextGuidance text_guidance_graph;
   ABSL_RETURN_IF_ERROR(text_guidance_graph.Init(&device_, weights_path));
@@ -368,7 +372,7 @@ absl::Status RunStableDiffusion(std::string weights_path) {
   ABSL_RETURN_IF_ERROR(
       copier_latent.Init(unet_out->GetDescriptor(), unet_in->GetDescriptor(), &device_));
 
-  ml_drift::Tensor<BHWC, DataType::INT32> tokens;
+  ml_drift::Tensor<BHWC, DataType::kInt32> tokens;
   tokens.shape = BHWC(1, 1, 2, 77);
   tokens.data.resize(tokens.shape.DimensionsProduct());
 

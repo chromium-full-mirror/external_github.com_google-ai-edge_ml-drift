@@ -16,7 +16,6 @@
 
 #include <memory>
 #include <utility>
-#include <variant>
 
 #include "ml_drift/common/data_type.h"
 #include "ml_drift/common/gpu_info.h"
@@ -25,6 +24,7 @@
 #include "ml_drift/common/kernels/conv_generic.h"
 #include "ml_drift/common/kernels/conv_wave_matrix.h"
 #include "ml_drift/common/kernels/conv_wave_matrix_mali.h"
+#include "ml_drift/common/kernels/conv_wave_matrix_mali_f16.h"
 #include "ml_drift/common/kernels/conv_wave_memory.h"
 #include "ml_drift/common/model_hints.h"
 #include "ml_drift/common/operations.h"
@@ -76,7 +76,7 @@ std::unique_ptr<GPUOperation> SelectConvolutionExternalWeightsAdreno(
     WeightsDescription* weights_desc, const TensorDescriptor* src_exp,
     bool different_weights_for_height,
     const ConvRuntimeCheckDesc& runtime_check) {
-  // TODO(sorokin): driver bug? workaround for b/424603203, may need additional
+  // TODO: driver bug? workaround for, may need additional
   // clarification
   const bool constant_buffer_sync_bug =
       gpu_info.IsApiOpenCl() && gpu_info.adreno_info.IsAdreno8xx();
@@ -108,10 +108,8 @@ std::unique_ptr<GPUOperation> SelectConvolutionApple(
     const GpuInfo& gpu_info, const OperationDef& op_def,
     CalculationsPrecision precision) {
   if (SupportsConvWaveMatrix(gpu_info, precision, attr) &&
-      IsGoodTaskSizeForAppleConvSimd(
-          dst_shape,
-          std::visit([](const auto& w) { return w.shape; }, attr.weights),
-          precision, gpu_info)) {
+      IsGoodTaskSizeForAppleConvSimd(dst_shape, attr.GetWeightsShape(),
+                                     precision, gpu_info)) {
     ConvWaveMatrix conv =
         CreateConvWaveMatrix(op_def, precision, dst_shape, attr, gpu_info);
     return std::make_unique<ConvWaveMatrix>(std::move(conv));
@@ -130,10 +128,8 @@ std::unique_ptr<GPUOperation> SelectConvolutionExternalWeightsApple(
     bool different_weights_for_height,
     const ConvRuntimeCheckDesc& runtime_check) {
   if (SupportsConvWaveMatrix(gpu_info, precision, attr) &&
-      IsGoodTaskSizeForAppleConvSimd(
-          dst_shape,
-          std::visit([](const auto& w) { return w.shape; }, attr.weights),
-          precision, gpu_info)) {
+      IsGoodTaskSizeForAppleConvSimd(dst_shape, attr.GetWeightsShape(),
+                                     precision, gpu_info)) {
     ConvWaveMatrix conv = CreateConvWaveMatrixExternalWeights(
         op_def, precision, dst_shape, attr, gpu_info, bias_desc, src_exp,
         different_weights_for_height, runtime_check);
@@ -157,6 +153,12 @@ std::unique_ptr<GPUOperation> SelectConvolutionMali(
       IsConvConstantsSupported(gpu_info, precision, attr)) {
     ConvConstants conv = CreateConvConstants(gpu_info, op_def, precision, attr);
     return std::make_unique<ConvConstants>(std::move(conv));
+  } else if (SupportsConvWaveMatrixMaliF16(gpu_info) &&
+             precision == CalculationsPrecision::kF16 && attr.groups == 1 &&
+             !op_def.dst_tensors[0].HasAxis(Axis::kBatch)) {
+    ConvWaveMatrixMaliF16 conv = CreateConvWaveMatrixMaliF16(
+        gpu_info, op_def.src_tensors[0], op_def.dst_tensors[0], attr);
+    return std::make_unique<ConvWaveMatrixMaliF16>(std::move(conv));
   } else {
     ConvGeneric conv =
         CreateConvGeneric(gpu_info, op_def, precision, attr, &dst_shape);
@@ -331,7 +333,7 @@ std::unique_ptr<GPUOperation> SelectConvolutionWithExternalWeights(
 }
 
 bool SupportsConvolutionInt8(const GpuInfo& gpu_info, const BHWC& src_shape) {
-  return SupportsConvAppleMPP(gpu_info) ||
+  return SupportsConvAppleMPP(gpu_info, src_shape) ||
          SupportsConvWaveMatrixMaliInt8(gpu_info, src_shape) ||
          SupportsConvWaveMemoryInt8(gpu_info) ||
          SupportsConvGenericInt8(gpu_info) ||
@@ -340,7 +342,7 @@ bool SupportsConvolutionInt8(const GpuInfo& gpu_info, const BHWC& src_shape) {
 
 PackedType GetConvolutionInt8SrcType(const GpuInfo& gpu_info,
                                      const BHWC& src_shape) {
-  if (SupportsConvAppleMPP(gpu_info)) {
+  if (SupportsConvAppleMPP(gpu_info, src_shape)) {
     return PackedType::kInt8C4;
   } else if (SupportsConvWaveMatrixMaliInt8(gpu_info, src_shape)) {
     return PackedType::kInt8W4C4;
@@ -358,11 +360,11 @@ PackedType GetConvolutionInt8SrcType(const GpuInfo& gpu_info,
 
 std::unique_ptr<GPUOperation> SelectConvolutionInt8(
     const GpuInfo& gpu_info, const OperationDef& op_def,
-    PackedType src_packed_type, const Tensor<OHWI, DataType::INT8>& weights,
+    PackedType src_packed_type, const Tensor<OHWI, DataType::kInt8>& weights,
     const BHWC& dst_shape) {
   BHWC src_shape = dst_shape;
   src_shape.c = weights.shape.i;
-  if (SupportsConvAppleMPP(gpu_info)) {
+  if (SupportsConvAppleMPP(gpu_info, src_shape)) {
     auto conv = CreateConvAppleMPPInt8(op_def.src_tensors[0],
                                        op_def.dst_tensors[0], weights);
     return std::make_unique<ConvAppleMPP>(std::move(conv));
@@ -391,7 +393,7 @@ std::unique_ptr<GPUOperation> SelectConvolutionInt8(
     const BHWC& dst_shape, WeightsDescription* weights_desc) {
   BHWC src_shape = dst_shape;
   src_shape.c = weights_shape.i;
-  if (SupportsConvAppleMPP(gpu_info)) {
+  if (SupportsConvAppleMPP(gpu_info, src_shape)) {
     auto conv = CreateConvAppleMPPInt8(op_def.src_tensors[0],
                                        op_def.dst_tensors[0], weights_shape);
     *weights_desc = conv.GetWeightsDescription();

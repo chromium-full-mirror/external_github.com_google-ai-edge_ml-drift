@@ -32,6 +32,7 @@
 #include "ml_drift/common/task/compiler_options.h"
 #include "ml_drift/common/task/gpu_operation.h"
 #include "ml_drift/common/task/tensor_desc.h"
+#include "ml_drift/common/task/util.h"
 #include "ml_drift/common/task/weights_conversion.h"
 #include "ml_drift/common/task/weights_layout.h"
 #include "ml_drift/common/types.h"
@@ -70,7 +71,7 @@ inline bool UseBufferForIntWeights(const GpuInfo& gpu_info, int int_bit_size,
     return true;
   }
   WeightsDescription weights_desc;
-  weights_desc.type = DataType::UINT8;
+  weights_desc.type = DataType::kUint8;
   weights_desc.layout = WeightsLayout::k2DYIsSpatialIOAndXIsOGroupI4O4;
   weights_desc.output_group_size = DivideRoundUp(weights_shape.o, 4);
   uint2 tex_size = Get2dResourceSize(weights_desc, weights_shape);
@@ -92,21 +93,46 @@ inline bool UseBufferForIntWeights(const GpuInfo& gpu_info, int int_bit_size,
   return !(can_use_textures && is_textures_recommended);
 }
 
+// Rebalances initial (x_size, y_size) workgroup dimensions by trading factors
+// of 2 within wg_total_size to respect input reduction bounds (max_y_size),
+// output slice bounds (dst_slices), and compute unit occupancy (cu_count).
+// Intended to be called as the final step of GetWorkGroupSize after selecting
+// device-specific initial dimensions.
+int3 RebalanceWorkGroupSize(int x_size, int y_size, int wg_total_size,
+                            int max_y_size, int dst_slices, int total_task_size,
+                            int cu_count) {
+  while (y_size > max_y_size && y_size > 1 && x_size < dst_slices) {
+    y_size /= 2;
+    x_size *= 2;
+  }
+  while ((x_size > dst_slices ||
+          (total_task_size / x_size < cu_count && y_size * 2 <= max_y_size)) &&
+         x_size > 1 && y_size * 2 <= wg_total_size) {
+    x_size /= 2;
+    y_size *= 2;
+  }
+  return int3(x_size, y_size, 1);
+}
+
 int3 GetWorkGroupSize(const FullyConnected::ConvParams& params,
-                      const GpuInfo& gpu_info, DataType acc_type,
-                      const OHWI& weights_shape) {
+                      const GpuInfo& gpu_info, const OHWI& weights_shape) {
   const bool is_quantized = fc::IsQuantized(params.weights_type);
   const int dst_slices = DivideRoundUp(weights_shape.o, 4);
-  if (gpu_info.IsApple() && gpu_info.IsApiMetal() &&
-      gpu_info.apple_info.IsMSeries()) {
-    int total_task_size = dst_slices;
-    if (params.batched_weights) {
-      if (params.runtime_batch_ids) {
-        total_task_size *= params.runtime_batch_ids;
-      } else {
-        total_task_size *= weights_shape.h;
-      }
-    }
+  const int src_slices = DivideRoundUp(weights_shape.i, 4);
+  const int max_y_size =
+      is_quantized ? src_slices : DivideRoundUp(src_slices, 4);
+  int groups_count = 1;
+  if (params.runtime_check.packed_groups.has_value()) {
+    const int w_groups =
+        DivideRoundUp(params.runtime_check.packed_groups->max_group_size,
+                      params.block_size.w);
+    groups_count = w_groups * params.runtime_check.packed_groups->num_groups;
+  } else if (params.batched_weights) {
+    groups_count =
+        params.runtime_batch_ids ? params.runtime_batch_ids : weights_shape.h;
+  }
+  const int total_task_size = dst_slices * groups_count;
+  if (gpu_info.IsApple() && gpu_info.IsApiMetal()) {
     const int cu_count = gpu_info.GetComputeUnitsCount();
     double task_size_per_cu = static_cast<double>(total_task_size) / cu_count;
     float multiplier = 1.0;
@@ -138,17 +164,10 @@ int3 GetWorkGroupSize(const FullyConnected::ConvParams& params,
     int wg_total_size = cu_count >= 16 ? 256 : 128;
     y_size = std::min(y_size, wg_total_size);
     x_size = wg_total_size / y_size;
-    return int3(x_size, y_size, 1);
+    return RebalanceWorkGroupSize(x_size, y_size, wg_total_size, max_y_size,
+                                  dst_slices, total_task_size, cu_count);
   }
   if (gpu_info.IsIntel() && gpu_info.IsApiOpenCl()) {
-    int total_task_size = dst_slices;
-    if (params.batched_weights) {
-      if (params.runtime_batch_ids) {
-        total_task_size *= params.runtime_batch_ids;
-      } else {
-        total_task_size *= weights_shape.h;
-      }
-    }
     const int cu_count = gpu_info.GetComputeUnitsCount();
     double task_size_per_cu = static_cast<double>(total_task_size) / cu_count;
     float multiplier = 1.0;
@@ -175,94 +194,79 @@ int3 GetWorkGroupSize(const FullyConnected::ConvParams& params,
     int wg_total_size = cu_count >= 64 ? 256 : 128;
     y_size = std::min(y_size, wg_total_size);
     x_size = wg_total_size / y_size;
-    return int3(x_size, y_size, 1);
+    return RebalanceWorkGroupSize(x_size, y_size, wg_total_size, max_y_size,
+                                  dst_slices, total_task_size, cu_count);
   }
   const int block_spatial =
       params.block_size.b * params.block_size.w * params.block_size.h;
   int wg_total_size = 32;
   float y_size_multiplier = 1;
-  if (gpu_info.IsMali()) {
-    if (gpu_info.mali_info.gpu_version == MaliGpu::kG925) {
+  if (gpu_info.IsMobileGpu()) {
+    // Default mobile baseline: 64 work items per work group.
+    wg_total_size = 64;
+    if (gpu_info.IsMali() && gpu_info.mali_info.gpu_version == MaliGpu::kG925) {
       wg_total_size = 128;
       y_size_multiplier = 2;
-    } else {
+    } else if (gpu_info.IsPowerVR()) {
+      wg_total_size = 128;
+    } else if (gpu_info.IsApple()) {
+      const int cu_count = gpu_info.GetComputeUnitsCount();
+      if (cu_count >= 24) {
+        wg_total_size = 256;
+        y_size_multiplier = 4;
+      } else if (cu_count >= 12) {
+        wg_total_size = 128;
+        y_size_multiplier = 2;
+      }
+    } else if (gpu_info.IsAdreno()) {
+      if (!gpu_info.adreno_info.IsAdreno3xx() &&
+          !gpu_info.adreno_info.IsAdreno4xx() &&
+          !gpu_info.adreno_info.IsAdreno5xx()) {
+        wg_total_size = 128;
+      }
+      if (is_quantized &&
+          gpu_info.adreno_info.generation >= AdrenoInfo::Generation::kGen7) {
+        wg_total_size = 256;
+      }
+      if (gpu_info.adreno_info.IsLowEnd()) {
+        wg_total_size = std::min(wg_total_size, 32);
+      }
+    }
+  } else if (gpu_info.IsDesktopGpu()) {
+    // Default desktop baseline: 128 work items per work group.
+    wg_total_size = 128;
+    const int cu_count = gpu_info.GetComputeUnitsCount();
+    if (gpu_info.IsApple() && cu_count < 12) {
       wg_total_size = 64;
     }
-  }
-  if (gpu_info.IsPowerVR()) {
-    wg_total_size = 128;
-  }
-  if (gpu_info.IsApple()) {
-    const int cu_count = gpu_info.GetComputeUnitsCount();
-    if (cu_count >= 24) {
-      wg_total_size = 256;
+    if (gpu_info.IsIntel()) {
+      y_size_multiplier = block_spatial > 1 ? 2 : 4;
+    } else if (cu_count >= (gpu_info.IsApple() ? 24 : 32)) {
+      if (!gpu_info.IsAMD()) {
+        wg_total_size = 256;
+      }
       y_size_multiplier = 4;
-    } else if (cu_count >= 12) {
-      wg_total_size = 128;
+    } else if (cu_count >= (gpu_info.IsApple() ? 12 : 16)) {
       y_size_multiplier = 2;
-    } else {
-      wg_total_size = 64;
-    }
-  }
-  if (gpu_info.IsAMD()) {
-    wg_total_size = 128;
-    const int cu_count = gpu_info.GetComputeUnitsCount();
-    if (cu_count >= 32) {
-      y_size_multiplier = 4;
-    } else if (cu_count >= 16) {
-      y_size_multiplier = 2;
-    } else {
-      y_size_multiplier = 1;
-    }
-  }
-  if (gpu_info.IsIntel()) {
-    wg_total_size = 128;
-    y_size_multiplier = block_spatial > 1 ? 2 : 4;
-  }
-  if (gpu_info.IsAdreno()) {
-    if (gpu_info.adreno_info.IsAdreno3xx() ||
-        gpu_info.adreno_info.IsAdreno4xx() ||
-        gpu_info.adreno_info.IsAdreno5xx()) {
-      wg_total_size = 64;
-    } else {
-      wg_total_size = 128;
-    }
-    if (is_quantized &&
-        gpu_info.adreno_info.generation >= AdrenoInfo::Generation::kGen7) {
-      wg_total_size = 256;
-    }
-    if (gpu_info.adreno_info.IsLowEnd()) {
-      wg_total_size = std::min(wg_total_size, 32);
-    }
-  }
-  if (gpu_info.IsNvidia()) {
-    const int cu_count = gpu_info.GetComputeUnitsCount();
-    if (cu_count >= 32) {
-      wg_total_size = 256;
-      y_size_multiplier = 4;
-    } else if (cu_count >= 16) {
-      wg_total_size = 128;
-      y_size_multiplier = 2;
-    } else {
-      wg_total_size = 128;
     }
   }
   int y_size = 8;
   if (is_quantized) {
-    if (params.weights_type == DataType::INT2) {
+    if (params.weights_type == DataType::kInt2) {
       y_size = 32;
     } else {
-      if (gpu_info.IsPowerVR() && params.weights_type == DataType::INT4) {
+      if (gpu_info.IsPowerVR() && params.weights_type == DataType::kInt4) {
         y_size = 32;
       } else {
         y_size = 16;
       }
     }
   }
-  if (dst_slices >= 512) {
+  if (dst_slices >= 512 ||
+      (total_task_size >= 512 && dst_slices >= src_slices)) {
     if (is_quantized) {
-      if (params.weights_type == DataType::INT4 ||
-          params.weights_type == DataType::INT2) {
+      if (params.weights_type == DataType::kInt4 ||
+          params.weights_type == DataType::kInt2) {
         y_size = 16;
       } else {
         y_size = 8;
@@ -271,13 +275,16 @@ int3 GetWorkGroupSize(const FullyConnected::ConvParams& params,
       y_size = 4;
     }
   }
+  if (dst_slices >= 768) {
+    y_size = is_quantized ? 8 : 4;
+  }
   if (dst_slices >= 1024) {
     y_size = is_quantized ? 4 : 2;
   }
   if (dst_slices >= 1024 * 2) {
     if (is_quantized) {
-      if (params.weights_type == DataType::INT4 ||
-          params.weights_type == DataType::INT2) {
+      if (params.weights_type == DataType::kInt4 ||
+          params.weights_type == DataType::kInt2) {
         y_size = 4;
       } else {
         y_size = 2;
@@ -288,7 +295,7 @@ int3 GetWorkGroupSize(const FullyConnected::ConvParams& params,
   }
   if (dst_slices >= 1024 * 4) {
     y_size = std::min(2, y_size);
-    if (is_quantized && params.weights_type == DataType::INT2) {
+    if (is_quantized && params.weights_type == DataType::kInt2) {
       y_size = 4;
     }
   }
@@ -297,7 +304,7 @@ int3 GetWorkGroupSize(const FullyConnected::ConvParams& params,
   }
   y_size *= y_size_multiplier;
   int x_size = wg_total_size / y_size;
-  if (dst_slices <= 64 && x_size >= 8) {
+  if (total_task_size <= 64 && x_size >= 8) {
     if (is_quantized) {
       x_size /= 2;
       y_size *= 2;
@@ -306,11 +313,13 @@ int3 GetWorkGroupSize(const FullyConnected::ConvParams& params,
       y_size = std::min(32, wg_total_size / x_size);
     }
   }
-  if (dst_slices <= 64 && gpu_info.IsApple()) {
+  if (total_task_size <= 64 && gpu_info.IsApple()) {
     x_size = 1;
     y_size = 64;
   }
-  return int3(x_size, y_size, 1);
+  return RebalanceWorkGroupSize(x_size, y_size, wg_total_size, max_y_size,
+                                dst_slices, total_task_size,
+                                gpu_info.GetComputeUnitsCount());
 }
 }  // namespace
 
@@ -334,33 +343,23 @@ FullyConnected::FullyConnected(const TensorDescriptor& src,
     args_.AddInt("src_groups", src_groups);
     args_.AddInt("src_group_size", src_slices / src_groups);
   }
-  const DataType acc_type = precision == CalculationsPrecision::F16
-                                ? DataType::FLOAT16
-                                : DataType::FLOAT32;
 
   work_group_size_ =
       conv_params_.wg_size.x != 0
           ? conv_params_.wg_size
-          : GetWorkGroupSize(conv_params_, gpu_info, acc_type, weights_shape);
+          : GetWorkGroupSize(conv_params_, gpu_info, weights_shape);
   wg_reduction_ = work_group_size_.y != 1;
   const int scale_zp_group_size =
       DivideRoundUp(weights_shape.i / conv_params.scale_zp_shape.i, 4);
-  code_ = GetFullyConnectedKernelCode(src, precision, gpu_info, weights_desc,
-                                      scale_zp_group_size);
-  absl::StrReplaceAll({{"SType", ToUclDataType(dst.GetDataType(), 1)},
-                       {"Type", ToUclDataType(dst.GetDataType(), 4)},
-                       {"AccSType", ToUclDataType(acc_type, 1)},
-                       {"AccType", ToUclDataType(acc_type, 4)},
-                       {"WG_SIZE_X", std::to_string(work_group_size_.x)},
-                       {"WG_SIZE_Y", std::to_string(work_group_size_.y)}},
-                      &code_);
+  code_ = GetFullyConnectedKernelCode(src, dst, precision, gpu_info,
+                                      weights_desc, scale_zp_group_size);
   if (gpu_info.IsMali()) {
     compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
   }
   if (gpu_info.IsAdreno()) {
     compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
   }
-  if (precision == CalculationsPrecision::F16 && gpu_info.IsIntel()) {
+  if (precision == CalculationsPrecision::kF16 && gpu_info.IsIntel()) {
     compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
   }
   if (gpu_info.IsMaleoon()) {
@@ -369,7 +368,7 @@ FullyConnected::FullyConnected(const TensorDescriptor& src,
   if (gpu_info.IsPowerVR()) {
     compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
   }
-  if (src.GetDataType() == DataType::INT8) {
+  if (src.GetDataType() == DataType::kInt8) {
     if (gpu_info.SupportsExtension("cl_qcom_dot_product8")) {
       compiler_options_.push_back(CompilerOptions::kCl20);
     } else if (gpu_info.SupportsExtension("cl_khr_integer_dot_product")) {
@@ -378,51 +377,35 @@ FullyConnected::FullyConnected(const TensorDescriptor& src,
   }
 }
 
-std::string AddBatchOffset(const std::string& stride) {
-  return absl::Substitute(R"(
-    a0 += w_batch_id * $0;
-    a1 += w_batch_id * $0;
-    a2 += w_batch_id * $0;
-    a3 += w_batch_id * $0;
-)",
-                          stride);
-}
-
-std::string GetRingedOAddresses(bool batched_weights) {
+std::string GetRingedOAddresses() {
   std::string c;
   // kOSpatialIOGroupO4I4 -> kBIOI4
   c += R"(
-    int o0 = (dst_s * 4 + ring_o_offset) % ring_size;
-    int o1 = (dst_s * 4 + 1 + ring_o_offset) % ring_size;
-    int o2 = (dst_s * 4 + 2 + ring_o_offset) % ring_size;
-    int o3 = (dst_s * 4 + 3 + ring_o_offset) % ring_size;
-    int a0 = src_s * ring_size + o0;
-    int a1 = src_s * ring_size + o1;
-    int a2 = src_s * ring_size + o2;
-    int a3 = src_s * ring_size + o3;
+    int src_offset = src_s * ring_size;
+    int a0 = src_offset + o0;
+    int a1 = src_offset + o1;
+    int a2 = src_offset + o2;
+    int a3 = src_offset + o3;
 )";
-  if (batched_weights) {
-    c += AddBatchOffset("ring_size * args.src_tensor.Slices()");
-  }
   return c;
 }
 
-std::string GetRingedIAddresses(bool batched_weights) {
+std::string GetRingedIAddresses() {
   std::string c;
   // kOSpatialIOGroupI4O4 -> kBIOI4O4
   c += R"(
     int i0 = (src_s * 4 + ring_i_offset) % ring_size;
-    int i1 = (src_s * 4 + 1 + ring_i_offset) % ring_size;
-    int i2 = (src_s * 4 + 2 + ring_i_offset) % ring_size;
-    int i3 = (src_s * 4 + 3 + ring_i_offset) % ring_size;
-    int a0 = ((i0 / 4) * args.dst_tensor.Slices() + dst_s) * 4 + i0 % 4;
-    int a1 = ((i1 / 4) * args.dst_tensor.Slices() + dst_s) * 4 + i1 % 4;
-    int a2 = ((i2 / 4) * args.dst_tensor.Slices() + dst_s) * 4 + i2 % 4;
-    int a3 = ((i3 / 4) * args.dst_tensor.Slices() + dst_s) * 4 + i3 % 4;
+    int i1 = i0 + 1;
+    int i2 = i0 + 2;
+    int i3 = i0 + 3;
+    i1 = i1 >= ring_size ? i1 - ring_size : i1;
+    i2 = i2 >= ring_size ? i2 - ring_size : i2;
+    i3 = i3 >= ring_size ? i3 - ring_size : i3;
+    int a0 = (i0 >> 2) * dst_stride + (i0 & 3) + ring_i_base;
+    int a1 = (i1 >> 2) * dst_stride + (i1 & 3) + ring_i_base;
+    int a2 = (i2 >> 2) * dst_stride + (i2 & 3) + ring_i_base;
+    int a3 = (i3 >> 2) * dst_stride + (i3 & 3) + ring_i_base;
 )";
-  if (batched_weights) {
-    c += AddBatchOffset("ring_size * args.dst_tensor.Slices()");
-  }
   return c;
 }
 
@@ -432,11 +415,11 @@ std::string ReadRingedWeightsAsFloat(
     const WeightsDescription& weights_desc) {
   std::string c;
   if (conv_params.runtime_check.ring_o_offset_index.has_value()) {
-    c += GetRingedOAddresses(conv_params.batched_weights);
+    c += GetRingedOAddresses();
   } else if (conv_params.runtime_check.ring_i_offset_index.has_value()) {
-    c += GetRingedIAddresses(conv_params.batched_weights);
+    c += GetRingedIAddresses();
   }
-  if (conv_params.weights_type == DataType::INT8) {
+  if (conv_params.weights_type == DataType::kInt8) {
     c += R"(
     uint4 w;
     w.x = args.weights.Read(a0);
@@ -486,10 +469,10 @@ std::string ReadWeightsAsFloat(const FullyConnected::ConvParams& conv_params,
       c += "    ucl::U32Sparse2x4ToU4x16AsVec4x4<SType>(weights, indexes, "
            "w0, w1, w2, w3);\n";
     } else if (fc::IsQuantized(conv_params.weights_type)) {
-      if (conv_params.weights_type == DataType::INT2) {
+      if (conv_params.weights_type == DataType::kInt2) {
         c += "    uint w = args.weights.Read(linear_i4o4);\n";
         c += "    ucl::U32x1ToU2x16AsVec4x4<SType>(w, w0, w1, w2, w3);\n";
-      } else if (conv_params.weights_type == DataType::INT4) {
+      } else if (conv_params.weights_type == DataType::kInt4) {
         c += "    uint2 w = args.weights.Read(linear_i4o4);\n";
         c += "    ucl::U32x2ToU4x16AsVec4x4<SType>(w, w0, w1, w2, w3);\n";
       } else {
@@ -512,13 +495,13 @@ std::string ReadWeightsAsFloat(const FullyConnected::ConvParams& conv_params,
       c += "    w1 = args.weights1.Read<SType>(" + x_c + ", " + y_c + ");\n";
       c += "    w2 = args.weights2.Read<SType>(" + x_c + ", " + y_c + ");\n";
       c += "    w3 = args.weights3.Read<SType>(" + x_c + ", " + y_c + ");\n";
-    } else if (conv_params.weights_type == DataType::INT8) {
+    } else if (conv_params.weights_type == DataType::kInt8) {
       c += "    uint4 w = args.weights.Read(" + x_c + ", " + y_c + ");\n";
       c += "    ucl::U32x4ToU8x16AsVec4x4<SType>(w, w0, w1, w2, w3);\n";
-    } else if (conv_params.weights_type == DataType::INT4) {
+    } else if (conv_params.weights_type == DataType::kInt4) {
       c += "    ushort4 w = args.weights.Read(" + x_c + ", " + y_c + ");\n";
       c += "    ucl::U16x4ToU4x16AsVec4x4<SType>(w, w0, w1, w2, w3);\n";
-    } else if (conv_params.weights_type == DataType::INT2) {
+    } else if (conv_params.weights_type == DataType::kInt2) {
       c += "    uchar4 w = args.weights.Read(" + x_c + ", " + y_c + ");\n";
       c += "    ucl::U8x4ToU2x16AsVec4x4<SType>(w, w0, w1, w2, w3);\n";
     }
@@ -545,7 +528,7 @@ std::string ReadWeightsAs4Uint8x4(const FullyConnected::ConvParams& conv_params,
     coords_2d = x_c + ", " + y_c;
   }
   if (fc::IsQuantized(conv_params.weights_type)) {
-    if (conv_params.weights_type == DataType::INT2) {
+    if (conv_params.weights_type == DataType::kInt2) {
       if (weights_desc.IsLinearLayout()) {
         c += "    uint w = args.weights.Read(linear_i4o4);\n";
       } else {
@@ -556,7 +539,7 @@ std::string ReadWeightsAs4Uint8x4(const FullyConnected::ConvParams& conv_params,
       c += "    w1 = (w >> 2u) & 50529027u;\n";
       c += "    w2 = (w >> 4u) & 50529027u;\n";
       c += "    w3 = (w >> 6u) & 50529027u;\n";
-    } else if (conv_params.weights_type == DataType::INT4) {
+    } else if (conv_params.weights_type == DataType::kInt4) {
       if (weights_desc.IsLinearLayout()) {
         c += "    uint2 w = args.weights.Read(linear_i4o4);\n";
       } else {
@@ -578,7 +561,7 @@ std::string ReadWeightsAs4Uint8x4(const FullyConnected::ConvParams& conv_params,
   w2 = t1 & 0x0F0F0F0Fu;
   w3 = (t1 >> 4u) & 0x0F0F0F0Fu;
 )";
-    } else if (conv_params.weights_type == DataType::INT8) {
+    } else if (conv_params.weights_type == DataType::kInt8) {
       if (weights_desc.IsLinearLayout()) {
         c += "    uint4 w = args.weights.Read(linear_i4o4);\n";
       } else {
@@ -607,13 +590,13 @@ std::string ReadWeightsAs4Uint8x4(const FullyConnected::ConvParams& conv_params,
 }
 
 std::string FullyConnected::GetFullyConnectedKernelCode(
-    const TensorDescriptor& src, CalculationsPrecision precision,
-    const GpuInfo& gpu_info, const WeightsDescription& weights_desc,
-    int scale_zp_group_size) {
+    const TensorDescriptor& src, const TensorDescriptor& dst,
+    CalculationsPrecision precision, const GpuInfo& gpu_info,
+    const WeightsDescription& weights_desc, int scale_zp_group_size) {
   const int block_spatial = conv_params_.block_size.b *
                             conv_params_.block_size.w *
                             conv_params_.block_size.h;
-  const bool int8_math = src.GetDataType() == DataType::INT8;
+  const bool int8_math = src.GetDataType() == DataType::kInt8;
   const bool is_quantized = fc::IsQuantized(conv_params_.weights_type);
 
   std::string c;
@@ -637,26 +620,56 @@ std::string FullyConnected::GetFullyConnectedKernelCode(
   } else {
     c += "  if (dst_s >= dst_end_slice) return;\n";
   }
+  if (conv_params_.batched_weights) {
+    c += fc::GetWeightsBatchId(conv_params_.runtime_batch_ids);
+  }
   if (conv_params_.runtime_check.ring_o_offset_index.has_value()) {
     c += fc::GetRingOOffset(conv_params_.runtime_check);
+    c += "  ring_o_offset = ((ring_o_offset % ring_size) + ring_size) % "
+         "ring_size;\n";
+    c += "  int o0 = (dst_s * 4 + ring_o_offset) % ring_size;\n";
+    c += "  int o1 = o0 + 1;\n";
+    c += "  int o2 = o0 + 2;\n";
+    c += "  int o3 = o0 + 3;\n";
+    c += "  o1 = o1 >= ring_size ? o1 - ring_size : o1;\n";
+    c += "  o2 = o2 >= ring_size ? o2 - ring_size : o2;\n";
+    c += "  o3 = o3 >= ring_size ? o3 - ring_size : o3;\n";
+    if (conv_params_.batched_weights) {
+      c += "  int ring_batch_offset = w_batch_id * ring_size * "
+           "args.src_tensor.Slices();\n";
+      c += "  o0 += ring_batch_offset;\n";
+      c += "  o1 += ring_batch_offset;\n";
+      c += "  o2 += ring_batch_offset;\n";
+      c += "  o3 += ring_batch_offset;\n";
+    }
   }
   if (conv_params_.runtime_check.ring_i_offset_index.has_value()) {
     c += fc::GetRingIOffset(conv_params_.runtime_check);
-  }
-  if (conv_params_.batched_weights) {
-    c += fc::GetWeightsBatchId(conv_params_.runtime_batch_ids);
+    c += "  ring_i_offset = ((ring_i_offset % ring_size) + ring_size) % "
+         "ring_size;\n";
+    c += "  int dst_stride = args.dst_tensor.Slices() * 4;\n";
+    c += "  int ring_i_base = dst_s * 4;\n";
+    if (conv_params_.batched_weights) {
+      c += "  ring_i_base += w_batch_id * ring_size * "
+           "args.dst_tensor.Slices();\n";
+    }
   }
   if (conv_params_.runtime_check.packed_groups.has_value()) {
     c += fc::GetPackedGroupsParams(conv_params_.runtime_check, /*dim_id=*/1,
                                    conv_params_.block_size.w);
   }
+  DataType acc_type = precision == CalculationsPrecision::kF16
+                          ? DataType::kFloat16
+                          : DataType::kFloat32;
+  if (src.GetDataType() == DataType::kInt8) {
+    acc_type = DataType::kInt32;
+  }
+  const std::string zero_value = GetZeroValue(acc_type);
   for (int sp_id = 0; sp_id < block_spatial; ++sp_id) {
     const std::string r_name = "r_sp" + std::to_string(sp_id);
+    c += "  AccType " + r_name + " = ucl::Init<AccType>(" + zero_value + ");\n";
     if (int8_math) {
-      c += "  int4 " + r_name + " = ucl::Init<int4>(0);\n";
       c += "  int " + r_name + "_sum = 0;\n";
-    } else {
-      c += "  AccType " + r_name + " = ucl::Init<AccType>(0.0f);\n";
     }
   }
   if (conv_params_.softmax_input_activation) {
@@ -676,8 +689,9 @@ std::string FullyConnected::GetFullyConnectedKernelCode(
   }
   std::string src_end_slices = "args.src_tensor.Slices()";
   if (conv_params_.runtime_check.src_end_ch_index.has_value()) {
-    c += "  int src_end_slices = "
-         "(args.params.Read(args.src_end_ch_index) + 3) / 4;\n";
+    c += "  int src_end_ch = min(args.params.Read(args.src_end_ch_index), "
+         "args.src_tensor.Channels());\n";
+    c += "  int src_end_slices = (src_end_ch + 3) / 4;\n";
     src_end_slices = "src_end_slices";
   }
   if (wg_reduction_) {
@@ -734,7 +748,7 @@ std::string FullyConnected::GetFullyConnectedKernelCode(
     std::string x_coord = std::to_string(bhw.z);
     if (conv_params_.runtime_check.packed_groups.has_value()) {
       x_coord = "dst_w + " + x_coord;
-      if (!src.CanReadOutOfBorder(Axis::WIDTH, gpu_info)) {
+      if (!src.CanReadOutOfBorder(Axis::kWidth, gpu_info)) {
         x_coord = "min(" + x_coord + ", args.src_tensor.Width() - 1)";
       }
       y_coord = "0";
@@ -753,6 +767,22 @@ std::string FullyConnected::GetFullyConnectedKernelCode(
       const std::string id = std::to_string(i);
       c += "  " + val_name + " = ucl::Exp<Type>(" + val_name + " - exp_val" +
            id + ".y) * exp_val" + id + ".x;\n";
+      if (conv_params_.runtime_check.src_end_ch_index.has_value() &&
+          conv_params_.runtime_check.softmax_mask_value.has_value()) {
+        args_.AddFloat("softmax_mask_value",
+                       *conv_params_.runtime_check.softmax_mask_value,
+                       dst.GetDataType());
+        c += "  if (src_s >= src_end_slices - 1) {\n";
+        c += "    if (src_s * 4 + 0 >= src_end_ch) " + val_name +
+             ".x = args.softmax_mask_value;\n";
+        c += "    if (src_s * 4 + 1 >= src_end_ch) " + val_name +
+             ".y = args.softmax_mask_value;\n";
+        c += "    if (src_s * 4 + 2 >= src_end_ch) " + val_name +
+             ".z = args.softmax_mask_value;\n";
+        c += "    if (src_s * 4 + 3 >= src_end_ch) " + val_name +
+             ".w = args.softmax_mask_value;\n";
+        c += "  }\n";
+      }
     }
   }
 
@@ -803,57 +833,21 @@ std::string FullyConnected::GetFullyConnectedKernelCode(
   }
   if (wg_reduction_) {
     c += "  } // end if condition\n";
-    int local_patch_size = block_spatial;
-    int data_type_size =
-        precision == CalculationsPrecision::F16 && gpu_info.SupportsFP16() ? 2
-                                                                           : 4;
-    int workgroup_storage_size = work_group_size_.x * work_group_size_.y *
-                                 local_patch_size * data_type_size * 4;
-    if (local_patch_size > 8 ||
-        (gpu_info.IsApiWebGpu() &&
-         workgroup_storage_size >
-             gpu_info.webgpu_info.max_compute_workgroup_storage_size)) {
-      local_patch_size = 1;
-    }
-    if (gpu_info.IsAdreno() && gpu_info.adreno_info.IsLowEnd()) {
-      local_patch_size = 1;
-    }
-    if (int8_math) {
-      c += "  __local int4 temp";
-    } else {
-      c += "  __local AccType temp";
-    }
-    if (local_patch_size != 1) {
-      c += "[" + std::to_string(local_patch_size) + "]";
+    const int local_batch_size = fc::GetLocalBatchSize(
+        gpu_info, precision, block_spatial, work_group_size_);
+    c += "  __local AccType temp";
+    if (local_batch_size != 1) {
+      c += "[" + std::to_string(local_batch_size) + "]";
     }
     c += "[" + std::to_string(work_group_size_.x * work_group_size_.y) + "];\n";
 
-    const int upload_groups = DivideRoundUp(block_spatial, local_patch_size);
+    const int upload_groups = DivideRoundUp(block_spatial, local_batch_size);
     for (int group = 0; group < upload_groups; ++group) {
-      const int first = group * local_patch_size;
+      const int first = group * local_batch_size;
       const int last =
-          std::min(block_spatial - 1, first + local_patch_size - 1);
-      for (int sp_id = first; sp_id <= last; ++sp_id) {
-        const std::string local_mem =
-            local_patch_size == 1 ? "temp"
-                                  : "temp[" + std::to_string(sp_id) + "]";
-        c += "  " + local_mem + "[tid.x * WG_SIZE_Y + tid.y] = r_sp" +
-             std::to_string(sp_id) + ";\n";
-      }
-      c += "  for (int ystride = WG_SIZE_Y / 2; ystride > 0; ystride /= 2) {\n";
-      c += "    ucl::SyncThreads<WorkGroup, Local>();\n";
-      c += "    if (tid.y < ystride) {\n";
-      for (int sp_id = first; sp_id <= last; ++sp_id) {
-        const std::string local_mem =
-            local_patch_size == 1 ? "temp"
-                                  : "temp[" + std::to_string(sp_id) + "]";
-        c += "      r_sp" + std::to_string(sp_id) + " += " + local_mem +
-             "[tid.x * WG_SIZE_Y + tid.y + ystride];\n";
-        c += "      " + local_mem + "[tid.x * WG_SIZE_Y + tid.y] = r_sp" +
-             std::to_string(sp_id) + ";\n";
-      }
-      c += "    }\n";
-      c += "  }\n";
+          std::min(block_spatial - 1, first + local_batch_size - 1);
+      c += fc::GetReductionCode(first, last, local_batch_size, "tid.x", "tid.y",
+                                "WG_SIZE_Y", "temp");
       if (group != upload_groups - 1) {
         c += "  ucl::SyncThreads<WorkGroup, Local>();\n";
       }
@@ -865,6 +859,14 @@ std::string FullyConnected::GetFullyConnectedKernelCode(
                             conv_params_.has_bias, conv_params_.batched_weights,
                             conv_params_.runtime_batch_ids);
   c += "}\n";
+
+  absl::StrReplaceAll({{"SType", ToUclDataType(dst.GetDataType(), 1)},
+                       {"Type", ToUclDataType(dst.GetDataType(), 4)},
+                       {"AccSType", ToUclDataType(acc_type, 1)},
+                       {"AccType", ToUclDataType(acc_type, 4)},
+                       {"WG_SIZE_X", std::to_string(work_group_size_.x)},
+                       {"WG_SIZE_Y", std::to_string(work_group_size_.y)}},
+                      &c);
   return c;
 }
 
@@ -883,7 +885,7 @@ int3 FullyConnected::GetGridSize() const {
 int GetRecommendedMaxTotalSpatialSize(const GpuInfo& gpu_info,
                                       CalculationsPrecision precision) {
   int base_max_size = 4;
-  if (precision == CalculationsPrecision::F16) {
+  if (precision == CalculationsPrecision::kF16) {
     base_max_size *= 2;
   }
   if (!gpu_info.IsMali()) {
@@ -975,8 +977,8 @@ absl::StatusOr<FullyConnected> CreateFullyConnectedExternalWeights(
           "Unsupported WeightsDescription layout for ringed weights.");
     }
   }
-  if (weights_desc.type == DataType::FLOAT32 ||
-      weights_desc.type == DataType::FLOAT16) {
+  if (weights_desc.type == DataType::kFloat32 ||
+      weights_desc.type == DataType::kFloat16) {
     if (weights_desc.type != DeduceDataTypeFromPrecision(precision)) {
       return absl::InvalidArgumentError("Unsupported WeightsDescription type.");
     }
@@ -1086,7 +1088,7 @@ WeightsDescription GetFullyConnectedInt8WeightsDesc(const GpuInfo& gpu_info,
                                                     const OHWI& weights_shape,
                                                     bool prefer_textures) {
   WeightsDescription weights_desc;
-  weights_desc.type = DataType::UINT8;
+  weights_desc.type = DataType::kUint8;
   if (UseBufferForIntWeights(gpu_info, /*int_bit_size=*/8, weights_shape,
                              prefer_textures)) {
     weights_desc.layout = WeightsLayout::kOSpatialIOGroupI4O4;
@@ -1101,7 +1103,7 @@ WeightsDescription GetFullyConnectedInt4WeightsDesc(const GpuInfo& gpu_info,
                                                     const OHWI& weights_shape,
                                                     bool prefer_textures) {
   WeightsDescription weights_desc;
-  weights_desc.type = DataType::UINT4;
+  weights_desc.type = DataType::kUint4;
   if (UseBufferForIntWeights(gpu_info, /*int_bit_size=*/4, weights_shape,
                              prefer_textures)) {
     weights_desc.layout = WeightsLayout::kOSpatialIOGroupI4O4;
@@ -1116,7 +1118,7 @@ WeightsDescription GetFullyConnectedInt2WeightsDesc(const GpuInfo& gpu_info,
                                                     const OHWI& weights_shape,
                                                     bool prefer_textures) {
   WeightsDescription weights_desc;
-  weights_desc.type = DataType::UINT2;
+  weights_desc.type = DataType::kUint2;
   if (UseBufferForIntWeights(gpu_info, /*int_bit_size=*/2, weights_shape,
                              prefer_textures)) {
     weights_desc.layout = WeightsLayout::kOSpatialIOGroupI4O4;

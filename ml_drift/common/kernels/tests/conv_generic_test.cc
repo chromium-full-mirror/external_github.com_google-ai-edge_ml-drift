@@ -350,6 +350,26 @@ TEST_P(ConvGenericFloatTest, ConvGenericExternalGroupedBatchedWi4Test) {
   ABSL_ASSERT_OK(status);
 }
 
+TEST_P(ConvGenericFloatTest, ConvGenericExternalQ4_0Test) {
+  const DataType data_type = DeduceDataTypeFromPrecision(precision());
+  if (!exec_env->IsStorageSupported(storage(), data_type)) {
+    GTEST_SKIP() << "Unsupported data type: " << ToString(data_type)
+                 << " storage type: " << ToString(storage());
+  }
+  const BHWC src_shape(1, 1, 24, 128);
+  const int dst_channels = 64;
+  auto status = ConvGenericExternalWi4Test(*exec_env, precision(), storage(),
+                                           src_shape, dst_channels,
+                                           /*batched_weights=*/false,
+                                           /*group_size=*/32,
+                                           /*has_zero_point=*/false);
+  if (!status.ok() &&
+      absl::StrContains(status.message(), exec_env->SkipTestMessage())) {
+    GTEST_SKIP() << status.message();
+  }
+  ABSL_ASSERT_OK(status);
+}
+
 TEST_P(ConvGenericFloatTest, ConvGenericExternalWi2Test) {
   const DataType data_type = DeduceDataTypeFromPrecision(precision());
   if (!exec_env->IsStorageSupported(storage(), data_type)) {
@@ -509,8 +529,8 @@ TEST_P(IntTest, ConvGeneric1x1Int8SymmetricTest) {
     GTEST_SKIP()
         << "ConvGeneric1x1Int8SymmetricTest not supported on this device.";
   }
-  if (!exec_env->IsStorageSupported(src_storage(), DataType::INT8) ||
-      !exec_env->IsStorageSupported(dst_storage(), DataType::INT32)) {
+  if (!exec_env->IsStorageSupported(src_storage(), DataType::kInt8) ||
+      !exec_env->IsStorageSupported(dst_storage(), DataType::kInt32)) {
     GTEST_SKIP()
         << "ConvGeneric1x1Int8SymmetricTest not supported for src storage: "
         << ToString(src_storage())
@@ -526,9 +546,9 @@ TEST_P(IntTest, ConvGenericInt8BigTest) {
   }
 
   // check dst
-  if (!exec_env->IsStorageSupported(dst_storage(), DataType::INT32)) {
+  if (!exec_env->IsStorageSupported(dst_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported storage type: " << ToString(dst_storage())
-                 << " data type: " << ToString(DataType::INT32);
+                 << " data type: " << ToString(DataType::kInt32);
   }
   ABSL_ASSERT_OK(ConvGenericInt8BigTest(*exec_env, src_storage(), dst_storage()));
 }
@@ -538,9 +558,9 @@ TEST_P(IntTest, ConvGenericInt8ExternalWeightsBigTest) {
     GTEST_SKIP() << "ConvGenericInt8ExternalWeightsBigTest not supported on "
                     "this device.";
   }
-  if (!exec_env->IsStorageSupported(dst_storage(), DataType::INT32)) {
+  if (!exec_env->IsStorageSupported(dst_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported storage type: " << ToString(dst_storage())
-                 << " data type: " << ToString(DataType::INT32);
+                 << " data type: " << ToString(DataType::kInt32);
   }
   ABSL_ASSERT_OK(ConvGenericInt8ExternalWeightsBigTest(*exec_env, src_storage(),
                                                   dst_storage()));
@@ -562,9 +582,9 @@ TEST_P(IntTest, ConvGenericInt4BigTest) {
   if (!SupportsConvGenericInt4(exec_env->GetGpuInfo(), src_shape)) {
     GTEST_SKIP() << "ConvGenericInt4 not supported on this device.";
   }
-  if (!exec_env->IsStorageSupported(dst_storage(), DataType::INT32)) {
+  if (!exec_env->IsStorageSupported(dst_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported storage type: " << ToString(dst_storage())
-                 << " data type: " << ToString(DataType::INT32);
+                 << " data type: " << ToString(DataType::kInt32);
   }
   ABSL_ASSERT_OK(ConvGenericInt4BigTest(*exec_env, src_storage(), dst_storage(),
                                    src_shape));
@@ -577,9 +597,9 @@ TEST_P(IntTest, ConvGenericInt4ExternalWeightsBigTest) {
   if (!SupportsConvGenericInt4(exec_env->GetGpuInfo(), src_shape)) {
     GTEST_SKIP() << "ConvGenericInt4 not supported on this device.";
   }
-  if (!exec_env->IsStorageSupported(dst_storage(), DataType::INT32)) {
+  if (!exec_env->IsStorageSupported(dst_storage(), DataType::kInt32)) {
     GTEST_SKIP() << "Unsupported storage type: " << ToString(dst_storage())
-                 << " data type: " << ToString(DataType::INT32);
+                 << " data type: " << ToString(DataType::kInt32);
   }
   ABSL_ASSERT_OK(ConvGenericInt4ExternalWeightsBigTest(*exec_env, src_storage(),
                                                   dst_storage(), src_shape));
