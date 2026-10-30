@@ -510,6 +510,7 @@ target_link_libraries(mld_common_kernels_tests_conv_wave_matrix_mali_f16_test_ut
     mld_common_task_testing_ref_ops
     mld_common_task_testing_util
     mld_common_tensor
+    XNNPACK
 )
 
 add_executable(conv_wave_matrix_mali_f16_test_opencl opencl_kernel_test.cc conv_wave_matrix_mali_f16_test.cc)

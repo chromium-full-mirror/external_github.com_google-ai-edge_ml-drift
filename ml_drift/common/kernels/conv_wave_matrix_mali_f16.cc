@@ -14,13 +14,13 @@
 
 #include "ml_drift/common/kernels/conv_wave_matrix_mali_f16.h"
 
-#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/strings/substitute.h"
+#include "absl/types/span.h"
 #include "ml_drift/common/data_type.h"
 #include "ml_drift/common/gpu_info.h"
 #include "ml_drift/common/kernel_info.h"
@@ -32,6 +32,8 @@
 #include "ml_drift/common/task/gpu_operation.h"
 #include "ml_drift/common/task/tensor_desc.h"
 #include "ml_drift/common/task/tuning_type.h"
+#include "ml_drift/common/task/weights_conversion.h"
+#include "ml_drift/common/task/weights_layout.h"
 #include "ml_drift/common/task/work_group_picking.h"
 #include "ml_drift/common/tensor.h"
 #include "ml_drift/common/types.h"
@@ -218,56 +220,6 @@ MAIN_FUNCTION($0) {
   return c;
 }
 
-static std::vector<half> ReorderWeights(
-    const ml_drift::Tensor<OHWI, DataType::kFloat32>& weights,
-    int s_block_size) {
-  const int src_channels = weights.shape.i;
-  const int dst_channels = weights.shape.o;
-  const int H = weights.shape.h;
-  const int W = weights.shape.w;
-  const int src_groups = DivideRoundUp(src_channels, 8);
-  const int dst_groups = DivideRoundUp(dst_channels, 16 * s_block_size);
-  std::vector<half> out(dst_groups * H * W * src_groups * s_block_size * 128,
-                        half(0.0f));
-  int block_offset = 0;
-  // OSpatialII2I2gr0O8I2gr1O2
-  for (int dst_group = 0; dst_group < dst_groups; dst_group++) {
-    for (int ky = 0; ky < H; ky++) {
-      for (int kx = 0; kx < W; kx++) {
-        for (int src_group = 0; src_group < src_groups; src_group++) {
-          for (int dst_block = 0; dst_block < s_block_size; dst_block++) {
-            int counter = 0;
-            int i_offset = src_group * 8;
-            int o_offset = (dst_group * s_block_size + dst_block) * 16;
-            for (int i2 = 0; i2 < 2; i2++) {
-              for (int i1 = 0; i1 < 2; i1++) {
-                for (int o1 = 0; o1 < 8; o1++) {
-                  for (int i0 = 0; i0 < 2; i0++) {
-                    for (int o0 = 0; o0 < 2; o0++) {
-                      int i_block = (i2 * 2 + i0) * 2 + i1;
-                      int o_block = o1 * 2 + o0;
-                      int i_ch = i_offset + i_block;
-                      int o_ch = o_offset + o_block;
-                      float val = 0.0f;
-                      if (o_ch < dst_channels && i_ch < src_channels) {
-                        val = weights.data[weights.shape.LinearIndex(
-                            {o_ch, ky, kx, i_ch})];
-                      }
-                      out[block_offset * 128 + counter++] = half(val);
-                    }
-                  }
-                }
-              }
-            }
-            block_offset++;
-          }
-        }
-      }
-    }
-  }
-  return out;
-}
-
 void AddXKernelParams(const Convolution2DAttributes& attr, GPUOperation* op) {
   const OHWI& weights_shape = attr.GetWeightsShape();
   op->args_.AddInt("stride_x", attr.strides.w);
@@ -329,16 +281,16 @@ int3 ConvWaveMatrixMaliF16::GetGridSize() const {
 
 void ConvWaveMatrixMaliF16::AddWeights(
     const Tensor<OHWI, DataType::kFloat32>& weights) {
-  std::vector<half> reordered_weights =
-      ReorderWeights(weights, kernel_params_.s_block_size);
+  const WeightsDescription weights_desc = GetWeightsDescription();
+  const int elements_count =
+      GetTotalElementsCountForLayout(weights_desc, weights.shape);
   BufferDescriptor buffer_desc;
   buffer_desc.element_type = DataType::kFloat16;
   buffer_desc.element_size = 4;
   buffer_desc.memory_type = MemoryType::kGlobal;
-  buffer_desc.size = reordered_weights.size() * SizeOf(DataType::kFloat16);
+  buffer_desc.size = elements_count * SizeOf(weights_desc.type);
   buffer_desc.data.resize(buffer_desc.size);
-  std::memcpy(buffer_desc.data.data(), reordered_weights.data(),
-              buffer_desc.size);
+  RearrangeWeights(weights, weights_desc, absl::MakeSpan(buffer_desc.data));
   args_.AddObject("weights",
                   std::make_unique<BufferDescriptor>(std::move(buffer_desc)));
 }

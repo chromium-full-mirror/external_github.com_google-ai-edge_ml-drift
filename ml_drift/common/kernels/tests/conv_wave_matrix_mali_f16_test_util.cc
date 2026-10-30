@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "gmock/gmock.h"
+#include "xnnpack.h"  // from @XNNPACK
 #include "absl/status/status.h"
 #include "absl/status/status_macros.h"
 #include "ml_drift/common/data_type.h"
@@ -61,6 +62,8 @@ absl::Status ConvWaveMatrixMaliF161x1BigTest(TestExecutionEnvironment& env,
   const int src_channels = 32;
   const int dst_channels = 64;
   auto weights = MakeSyntheticTensor(OHWI(dst_channels, 1, 1, src_channels));
+  weights.data.resize(weights.shape.DimensionsProduct() +
+                      XNN_EXTRA_BYTES / sizeof(float));
   Convolution2DAttributes attr;
   attr.padding.prepended = HW(0, 0);
   attr.padding.appended = HW(0, 0);
@@ -84,6 +87,8 @@ absl::Status ConvWaveMatrixMaliF16BigTest(TestExecutionEnvironment& env,
   const int src_channels = 11;
   const int dst_channels = 27;
   auto weights = MakeSyntheticTensor(OHWI(dst_channels, 2, 3, src_channels));
+  weights.data.resize(weights.shape.DimensionsProduct() +
+                      XNN_EXTRA_BYTES / sizeof(float));
   Convolution2DAttributes attr;
   attr.padding.prepended = HW(1, 0);
   attr.padding.appended = HW(0, 1);

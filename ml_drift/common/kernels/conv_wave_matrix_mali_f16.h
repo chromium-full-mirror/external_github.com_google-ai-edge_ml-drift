@@ -26,6 +26,7 @@
 #include "ml_drift/common/task/gpu_operation.h"
 #include "ml_drift/common/task/tensor_desc.h"
 #include "ml_drift/common/task/tuning_type.h"
+#include "ml_drift/common/task/weights_layout.h"
 #include "ml_drift/common/tensor.h"
 #include "ml_drift/common/types.h"
 
@@ -65,6 +66,14 @@ class ConvWaveMatrixMaliF16 : public GPUOperation {
       const KernelInfo& kernel_info) const override;
 
   int3 GetGridSize() const override;
+
+  WeightsDescription GetWeightsDescription() const {
+    WeightsDescription weights_desc;
+    weights_desc.type = DataType::kFloat16;
+    weights_desc.layout = WeightsLayout::kOSpatialIOGroupI2I2gr0O8I2gr1O2;
+    weights_desc.output_group_size = kernel_params_.s_block_size;
+    return weights_desc;
+  }
 
   std::string_view GetDebugName() const override {
     return "conv_wave_matrix_mali_f16";
