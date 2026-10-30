@@ -1583,9 +1583,10 @@ class ConvCodeGenerator {
       // vec4 accumulators
       for (int i = 0; i < kernel_params_.block_size.w; ++i) {
         const std::string w_name = "W" + std::to_string(i);
-        c += "    short4 " + w_name +
-             " = ((__global short4*)weights_offset)[simd_id + " +
-             std::to_string(i * 16) + "];\n";
+        c += "    short4 " + w_name + " = as_short4(";
+        c += "intel_sub_group_block_read_us4(((__global "
+             "ushort*)weights_offset) + " +
+             std::to_string(i * 16 * 4) + "));\n";
       }
     } else {
       // kernel_params_.use_vec8_accum
@@ -3243,29 +3244,11 @@ WeightsDescription GetWeightsDescription(
     WeightsDescription desc;
     desc.type = conv_params.weights_data_type;
     desc.layout = WeightsLayout::kCustomGroups;
-    if (kernel_params.use_vec8_accum) {
-      const int i_block_size =
-          16 * (16 / SizeInBitsOf(conv_params.weights_data_type));
-      desc.group_sizes.push_back({Axis::kInputChannels, i_block_size});
-      desc.group_sizes.push_back(
-          {Axis::kOutputChannels, 8 * kernel_params.block_size.w / 2});
-    } else {
-      if (conv_params.Is8Bit()) {
-        desc.group_sizes.push_back({Axis::kInputChannels, 2});
-      } else if (conv_params.Is4Bit()) {
-        desc.group_sizes.push_back({Axis::kInputChannels, 4});
-      }
-      desc.group_sizes.push_back({Axis::kOutputChannels, 4});
-      if (conv_params.Is8Bit()) {
-        // keep last block in i2o4i2 layout to work with gpu conversion kernel
-        desc.group_sizes.push_back({Axis::kInputChannels, 2});
-        desc.group_sizes.push_back({Axis::kInputChannels, 8});
-      } else {
-        desc.group_sizes.push_back({Axis::kInputChannels, 16});
-      }
-      desc.group_sizes.push_back(
-          {Axis::kOutputChannels, kernel_params.block_size.w});
-    }
+    const int i_block_size =
+        16 * (16 / SizeInBitsOf(conv_params.weights_data_type));
+    desc.group_sizes.push_back({Axis::kInputChannels, i_block_size});
+    desc.group_sizes.push_back(
+        {Axis::kOutputChannels, 4 * kernel_params.block_size.w});
     desc.group_sizes.push_back({Axis::kInputChannels, 0});
     if (conv_params.kernel_size.x != 1) {
       desc.group_sizes.push_back({Axis::kWidth, 0});
